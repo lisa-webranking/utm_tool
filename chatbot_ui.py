@@ -257,7 +257,7 @@ def clean_bot_response(text: str) -> str:
             encoded = urlencode(merged, doseq=True, safe="")
             final_url = urlunparse((p.scheme, p.netloc, p.path, p.params, encoded, p.fragment))
             final_url = _rebuild_url_with_encoded_query(final_url)
-            return "Copia e incolla questo link completo:\\n" + final_url
+            return "Copia e incolla questo link completo:\n" + final_url
 
     # Se il testo include un URL, prova a “ripulire” e re-encodare solo quello
     url_in_text = _extract_first_url(text)
@@ -268,7 +268,7 @@ def clean_bot_response(text: str) -> str:
         # Se il bot ha scritto testo + url, mantieni solo l’istruzione + url
         # (per rispettare la richiesta “output solo link”)
         if "utm_" in fixed:
-            return "Copia e incolla questo link completo:\\n" + fixed
+            return "Copia e incolla questo link completo:\n" + fixed
 
     return text
 
@@ -448,7 +448,7 @@ REGOLE utm_campaign (STRUTTURA OBBLIGATORIA)
 Formato: country-lingua_campaignType_campaignName_data[_CTA]
 Token separati da underscore _, parole dentro un token separate da trattino -.
 Token richiesti:
-1) country-lingua: codice paese + lingua (es. it-it, ch-de, es-es)
+1) country-lingua: indica la provenienza/lingua della campagna. È sufficiente inserire UNO dei due: solo il paese (es. it, ch, es) OPPURE paese-lingua (es. it-it, ch-de, es-es). Non è obbligatorio fornire entrambi. Esempi validi: "it", "ch", "it-it", "ch-de".
 2) campaignType: uno tra promo (promotional), ed (editorial), tr (transactional), awr (awareness)
 3) campaignName: nome interno della campagna
 4) data: data invio/riferimento temporale (formato GG-MM-AAAA consigliato)
@@ -481,6 +481,13 @@ REGOLE GA4: QUANDO USARLO
   a) l'utente chiede verifica/storico (es. "ultimo anno")
   b) medium/source rischiano di mandare nel canale sbagliato
   c) servono opzioni coerenti con lo storico
+
+GESTIONE ERRORI GA4
+- Se un tool GA4 restituisce un dict con chiave "error", riporta all'utente il messaggio esatto: es. "Errore GA4: <valore di error>".
+- Se l'errore contiene "error_type", segnalalo: es. "Tipo: PermissionDenied".
+- Non assumere che sia sempre un problema di permessi: potrebbe essere un token scaduto, uno scope mancante, o un property_id errato.
+- Se GA4 non è disponibile, continua comunque il flusso UTM usando le regole statiche e i mapping definiti sopra.
+- Non bloccare il flusso UTM a causa di errori GA4: prosegui e proponi opzioni basate sulle regole.
 
 PROPERTY GA4: NON chiedere property_id all'utente
 - Quando hai un URL di destinazione, usa tool_guess_property_from_url(URL) per proporre 1-3 candidate property.
@@ -693,6 +700,11 @@ def render_chatbot_interface(creds, api_key_func=None) -> None:
 
     # 2. STYLE PER LA WINDOW
     window_css = """
+        /* ------------------------------------------------
+         * CHAT WINDOW: fixed overlay, non disturba il layout
+         * Il window-marker block e' position:fixed quindi
+         * e' rimosso dal normal flow senza impattare la pagina.
+         * ------------------------------------------------ */
         div[data-testid="stVerticalBlock"]:has(span.window-marker) {
             position: fixed;
             bottom: 110px;
@@ -712,38 +724,58 @@ def render_chatbot_interface(creds, api_key_func=None) -> None:
             padding: 0 !important;
             gap: 0 !important;
         }
-        
+
+        /* Scrollable messages area (pure HTML) */
+        .chat-messages-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            background: #f9fafb;
+        }
+
+        /* Input area dentro la window */
+        div[data-testid="stVerticalBlock"]:has(span.window-marker)
+            div[data-testid="stForm"] {
+            padding: 8px !important;
+            border-top: 1px solid #e5e7eb;
+            background: white;
+            flex-shrink: 0;
+        }
+
         .chat-header {
             background: #2563eb;
             color: white;
-            padding: 16px 20px;
+            padding: 12px 16px;
             display: flex;
             justify-content: space-between;
             align-items: center;
             font-weight: 600;
-            font-size: 16px;
+            font-size: 15px;
             border-bottom: 1px solid #1d4ed8;
-            flex-shrink: 0; 
+            flex-shrink: 0;
         }
-        
-        .msg-bubble { 
-            padding: 12px 16px; 
-            border-radius: 12px; 
-            font-size: 14px; 
-            line-height: 1.5; 
+
+        .msg-bubble {
+            padding: 10px 14px;
+            border-radius: 12px;
+            font-size: 14px;
+            line-height: 1.5;
             max-width: 85%;
             word-wrap: break-word;
         }
-        .msg-user { 
-            background: #2563eb; 
-            color: white; 
-            align-self: flex-end; 
+        .msg-user {
+            background: #2563eb;
+            color: white;
+            align-self: flex-end;
             border-bottom-right-radius: 2px;
         }
-        .msg-bot { 
-            background: white; 
-            color: #1f2937; 
-            border: 1px solid #e5e7eb; 
+        .msg-bot {
+            background: white;
+            color: #1f2937;
+            border: 1px solid #e5e7eb;
             align-self: flex-start;
             border-bottom-left-radius: 2px;
             box-shadow: 0 1px 2px rgba(0,0,0,0.05);
@@ -751,6 +783,10 @@ def render_chatbot_interface(creds, api_key_func=None) -> None:
     """
 
     st.markdown(f"<style>{fab_css}{window_css}</style>", unsafe_allow_html=True)
+
+    # Marker esterno: collassa l'intera sezione chatbot nel layout Streamlit
+    # in modo che non occupi spazio verticale nella pagina
+    st.markdown('<div class="chatbot-outer-marker" style="display:none;"></div>', unsafe_allow_html=True)
 
     # 1. FLOATING BUTTON CONTAINER
     # Usiamo una colonna isolata (st.columns crea un wrapper specifico diverso dal main flow)
@@ -778,28 +814,20 @@ def render_chatbot_interface(creds, api_key_func=None) -> None:
                     
             st.markdown('<div style="height:1px; background:#e5e7eb; margin: 10px 0;"></div>', unsafe_allow_html=True)
 
-            # MESSAGES
-            msg_container = st.container(height=450, border=False)
-            with msg_container:
-                if not st.session_state.messages:
-                    if icon_b64:
-                        img_html = f'<img src="data:image/png;base64,{icon_b64}" style="width:60px; height:60px; margin-bottom:15px; opacity:0.8; border-radius:50%;">'
-                    else:
-                        img_html = ''
-                    st.markdown(f"""
-                        <div style="text-align:center; padding:30px 20px; color:#6b7280; font-size:14px;">
-                            {img_html}
-                            <br>
-                            <b>Ciao!</b><br>
-                            Sono qui per aiutarti coi parametri UTM.
-                        </div>
-                    """, unsafe_allow_html=True)
-                
+            # MESSAGES – render come HTML puro per evitare spazio nel layout Streamlit
+            if not st.session_state.messages:
+                img_tag = f'<img src="data:image/png;base64,{icon_b64}" style="width:60px;height:60px;margin-bottom:12px;opacity:0.8;border-radius:50%;"><br>' if icon_b64 else ''
+                msgs_html = f'<div class="chat-messages-area"><div style="text-align:center;padding:30px 16px;color:#6b7280;font-size:14px;">{img_tag}<b>Ciao!</b><br>Sono qui per aiutarti coi parametri UTM.</div></div>'
+            else:
+                rows = []
                 for msg in st.session_state.messages:
+                    content = msg["content"].replace("\n", "<br>")
                     if msg["role"] == "user":
-                        st.markdown(f'<div style="display:flex; justify-content:flex-end;"><div class="msg-bubble msg-user">{msg["content"]}</div></div>', unsafe_allow_html=True)
+                        rows.append(f'<div style="display:flex;justify-content:flex-end;margin-bottom:6px;"><div class="msg-bubble msg-user">{content}</div></div>')
                     else:
-                        st.markdown(f'<div style="display:flex; justify-content:flex-start;"><div class="msg-bubble msg-bot">{msg["content"]}</div></div>', unsafe_allow_html=True)
+                        rows.append(f'<div style="display:flex;justify-content:flex-start;margin-bottom:6px;"><div class="msg-bubble msg-bot">{content}</div></div>')
+                msgs_html = '<div class="chat-messages-area">' + ''.join(rows) + '</div>'
+            st.markdown(msgs_html, unsafe_allow_html=True)
 
             # INPUT
             with st.form("chat_input_form", clear_on_submit=True):

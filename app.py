@@ -7,6 +7,7 @@ from slugify import slugify
 from urllib.parse import urlparse, parse_qs
 
 import re
+import html as html_lib  # per escapare valori UTM nell'HTML
 
 # Google Auth & Analytics import os
 import google.auth
@@ -182,7 +183,12 @@ def do_oauth_flow():
     
     # Token.json memorizza i token di accesso e refresh utente
     if os.path.exists(token_path):
-        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+        try:
+            creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+        except Exception:
+            # Token malformato o scaduto: eliminalo e riparte dall'OAuth
+            os.remove(token_path)
+            creds = None
     
     # Se non ci sono credenziali valide, fai il login
     if not creds or not creds.valid:
@@ -201,7 +207,11 @@ def do_oauth_flow():
                 secrets_path, SCOPES)
             # Usa una porta fissa (8080) per evitare mismatch con le URI autorizzate in Google Cloud
             try:
-                creds = flow.run_local_server(port=8080)
+                creds = flow.run_local_server(
+                    port=8080,
+                    access_type='offline',
+                    prompt='consent'  # forza Google a restituire sempre il refresh_token
+                )
             except OSError as e:
                 if "Address already in use" in str(e) or "[WinError 10048]" in str(e):
                     st.error("❌ Errore: La porta 8080 è occupata. Probabilmente un'altra istanza di login è rimasta appesa. Riprova tra qualche secondo o chiudi i processi python.exe dal Task Manager.")
@@ -381,6 +391,25 @@ def show_dashboard():
                 if close_btn:
                     st.session_state.show_settings = False
                     st.rerun()
+            
+            # --- GA4 Diagnostics ---
+            st.markdown("---")
+            st.markdown("### 🔌 Connessione GA4")
+            if st.button("🔁 Test connessione GA4", key="test_ga4_btn"):
+                with st.spinner("Verifica connessione GA4..."):
+                    result = ga4_mcp_tools.get_account_summaries(st.session_state.credentials)
+                if isinstance(result, list) and len(result) > 0:
+                    st.success(f"✅ Connessione GA4 OK! Trovati {len(result)} account.")
+                elif isinstance(result, list) and len(result) == 0:
+                    st.warning("⚠️ Connessione OK ma nessun account GA4 trovato per questo utente.")
+                elif isinstance(result, dict) and "error" in result:
+                    error_type = result.get("error_type", "Sconosciuto")
+                    error_msg = result.get("error", "")
+                    st.error(f"❌ Errore GA4\n\n**Tipo:** {error_type}\n\n**Dettaglio:** {error_msg}")
+                    if any(kw in error_msg.lower() for kw in ["credentials", "scope", "permission", "unauthenticated", "unauthorized", "403", "401"]):
+                        st.warning("💡 Il token OAuth potrebbe avere scope insufficienti. Prova a fare **Logout** e ri-accedere con Google.")
+                else:
+                    st.info(f"Risposta inattesa: {result}")
 
     st.markdown("""
     **Guida passo a passo nella generazione di link completi di parametri UTM.**  
@@ -650,32 +679,27 @@ def show_dashboard():
                     for label, key, tag_class, is_required in fields_to_check:
                         val_list = params.get(key, [])
                         val = val_list[0] if val_list else None
-                        
+
                         if val:
                             # Valore presente (VERDE)
                             display_val = f'{val} <span class="check-icon">✔</span>'
                         else:
                             if is_required:
-                                # Valore assente e obbligatorio (ROSSO)
                                 display_val = '<span class="error-text">Mancante</span> <span class="error-icon">✖</span>'
                             else:
-                                # Valore assente ma opzionale (Grigio)
                                 display_val = '<span style="color:#ccc">-</span>'
-                        
-                        # Concatena la riga HTML
-                        html_output += f"""
-                        <div class="utm-row">
-                            <div class="utm-label-col">
-                                <span class="utm-tag {tag_class}">{label}:</span>
-                            </div>
-                            <div class="utm-value-col">{display_val}</div>
-                        </div>
-                        """
-                    
-                    # Chiudi il div della card
+
+                        # Riga HTML: NESSUNA indentazione per evitare che Markdown la tratti come code block
+                        html_output += (
+                            '<div class="utm-row">'
+                            f'<div class="utm-label-col"><span class="utm-tag {tag_class}">{label}:</span></div>'
+                            f'<div class="utm-value-col">{display_val}</div>'
+                            '</div>'
+                        )
+
                     html_output += "</div>"
-                    
-                    # Stampa tutto l'HTML in una volta sola (SOLUZIONE AL BUG VISIVO)
+
+                    # Stampa tutto l'HTML in una volta sola
                     st.markdown(html_output, unsafe_allow_html=True)
 
                 except Exception as e:

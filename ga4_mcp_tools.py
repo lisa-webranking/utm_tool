@@ -32,7 +32,7 @@ def get_account_summaries(creds):
             summaries.append(acc_data)
         return summaries
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": str(e), "error_type": type(e).__name__}
 
 def get_property_details(property_id, creds):
     """Returns details about a property."""
@@ -53,7 +53,7 @@ def get_property_details(property_id, creds):
             "time_zone": repo.time_zone
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": str(e), "error_type": type(e).__name__}
 
 def list_google_ads_links(property_id, creds):
     """Lists Google Ads links for a property."""
@@ -71,7 +71,7 @@ def list_google_ads_links(property_id, creds):
             })
         return links
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": str(e), "error_type": type(e).__name__}
 
 def run_report(property_id, dimensions, metrics, date_ranges, creds, limit=10):
     """Runs a standard GA4 report."""
@@ -107,7 +107,7 @@ def run_report(property_id, dimensions, metrics, date_ranges, creds, limit=10):
             
         return result
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": str(e), "error_type": type(e).__name__}
 
 def run_realtime_report(property_id, dimensions, metrics, creds, limit=10):
     """Runs a realtime GA4 report."""
@@ -139,4 +139,4 @@ def run_realtime_report(property_id, dimensions, metrics, creds, limit=10):
             
         return result
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": str(e), "error_type": type(e).__name__}
