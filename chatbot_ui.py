@@ -600,6 +600,10 @@ def render_chatbot_interface(creds, api_key_func=None) -> None:
         st.session_state.chat_visible = False
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    if "chat_is_responding" not in st.session_state:
+        st.session_state.chat_is_responding = False
+    if "pending_user_text" not in st.session_state:
+        st.session_state.pending_user_text = None
     if "utm_context" not in st.session_state:
         st.session_state.utm_context = {
             "current_step": 0,
@@ -702,10 +706,10 @@ def render_chatbot_interface(creds, api_key_func=None) -> None:
     window_css = """
         /* ------------------------------------------------
          * CHAT WINDOW: fixed overlay, non disturba il layout
-         * Il window-marker block e' position:fixed quindi
-         * e' rimosso dal normal flow senza impattare la pagina.
+         * Il selector prende il vertical block piu' interno
+         * con marker dedicato per evitare side effect sui parent.
          * ------------------------------------------------ */
-        div[data-testid="stVerticalBlock"]:has(span.window-marker) {
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope)) {
             position: fixed;
             bottom: 110px;
             right: 30px;
@@ -725,24 +729,59 @@ def render_chatbot_interface(creds, api_key_func=None) -> None:
             gap: 0 !important;
         }
 
-        /* Scrollable messages area (pure HTML) */
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            > div[data-testid="element-container"] {
+            margin-bottom: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            > div[data-testid="element-container"]:last-child {
+            margin-bottom: 0 !important;
+            padding-bottom: 0 !important;
+        }
+
+        /* Scroll storico messaggi in area dedicata */
         .chat-messages-area {
-            flex: 1;
+            height: clamp(180px, 48vh, 360px);
+            min-height: 0;
             overflow-y: auto;
             padding: 10px 8px;
             display: flex;
-            flex-direction: column;
+            flex-direction: column-reverse;
             gap: 8px;
             background: #f9fafb;
+            flex: 0 0 auto;
+            overflow-anchor: none;
         }
 
         /* Input area dentro la window */
-        div[data-testid="stVerticalBlock"]:has(span.window-marker)
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            > div[data-testid="element-container"]:has(div[data-testid="stForm"]) {
+            margin-top: auto !important;
+            margin-bottom: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="stForm"] {
-            padding: 8px !important;
+            padding: 8px 8px 0 !important;
             border-top: 1px solid #e5e7eb;
             background: white;
-            flex-shrink: 0;
+            position: sticky;
+            bottom: 0;
+            z-index: 3;
+            margin-bottom: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stForm"] form {
+            margin-bottom: 0 !important;
+            padding-bottom: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stFormSubmitButton"] {
+            margin-bottom: 0 !important;
+            padding-bottom: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="element-container"]:has([data-testid="stSpinner"]) {
+            display: none !important;
         }
 
         .chat-header {
@@ -780,6 +819,27 @@ def render_chatbot_interface(creds, api_key_func=None) -> None:
             border-bottom-left-radius: 2px;
             box-shadow: 0 1px 2px rgba(0,0,0,0.05);
         }
+        .msg-loading {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: #334155;
+            background: #eff6ff;
+            border-color: #bfdbfe;
+        }
+        .chat-loader {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            border: 2px solid #bfdbfe;
+            border-top-color: #2563eb;
+            animation: chat-loader-spin .8s linear infinite;
+            flex-shrink: 0;
+        }
+        @keyframes chat-loader-spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
     """
 
     st.markdown(f"<style>{fab_css}{window_css}</style>", unsafe_allow_html=True)
@@ -801,7 +861,7 @@ def render_chatbot_interface(creds, api_key_func=None) -> None:
     # 2. CHAT WINDOW CONTAINER
     if st.session_state.chat_visible:
         with st.container():
-            st.markdown('<span class="window-marker" style="display:none;"></span>', unsafe_allow_html=True)
+            st.markdown('<div class="chat-window-scope" style="display:none;"></div>', unsafe_allow_html=True)
             
             # HEADER
             c_h1, c_h2 = st.columns([0.85, 0.15])
@@ -815,126 +875,177 @@ def render_chatbot_interface(creds, api_key_func=None) -> None:
             st.markdown('<div style="height:1px; background:#e5e7eb; margin: 10px 0;"></div>', unsafe_allow_html=True)
 
             # MESSAGES – render come HTML puro per evitare spazio nel layout Streamlit
-            if not st.session_state.messages:
+            if not st.session_state.messages and not st.session_state.chat_is_responding:
                 img_tag = f'<img src="data:image/png;base64,{icon_b64}" style="width:60px;height:60px;margin-bottom:12px;opacity:0.8;border-radius:50%;"><br>' if icon_b64 else ''
                 msgs_html = f'<div class="chat-messages-area"><div style="text-align:center;padding:30px 16px;color:#6b7280;font-size:14px;">{img_tag}<b>Ciao!</b><br>Sono qui per aiutarti coi parametri UTM.</div></div>'
             else:
                 rows = []
-                for msg in st.session_state.messages:
+                if st.session_state.chat_is_responding:
+                    rows.append(
+                        '<div style="display:flex;justify-content:flex-start;margin-bottom:6px;">'
+                        '<div class="msg-bubble msg-bot msg-loading"><span class="chat-loader"></span>'
+                        'WR Assistant sta rispondendo...</div></div>'
+                    )
+
+                for msg in reversed(st.session_state.messages):
                     content = msg["content"].replace("\n", "<br>")
                     if msg["role"] == "user":
                         rows.append(f'<div style="display:flex;justify-content:flex-end;margin-bottom:6px;"><div class="msg-bubble msg-user">{content}</div></div>')
                     else:
                         rows.append(f'<div style="display:flex;justify-content:flex-start;margin-bottom:6px;"><div class="msg-bubble msg-bot">{content}</div></div>')
+
                 msgs_html = '<div class="chat-messages-area">' + ''.join(rows) + '</div>'
             st.markdown(msgs_html, unsafe_allow_html=True)
 
             # INPUT
+            chat_locked = bool(st.session_state.chat_is_responding)
+            input_placeholder = "WR Assistant sta rispondendo..." if chat_locked else "Scrivi qui..."
+
             with st.form("chat_input_form", clear_on_submit=True):
-                user_text = st.text_input("Messaggio", label_visibility="collapsed", placeholder="Scrivi qui...")
-                submitted = st.form_submit_button("Invia ➤", use_container_width=True)
-                
-                if submitted and user_text:
-                    st.session_state.messages.append({"role": "user", "content": user_text})
-                    
-                    try:
+                user_text = st.text_input(
+                    "Messaggio",
+                    label_visibility="collapsed",
+                    placeholder=input_placeholder,
+                    disabled=chat_locked,
+                )
+                submitted = st.form_submit_button("Invia", use_container_width=True, disabled=chat_locked)
+
+            if submitted and user_text and not chat_locked:
+                st.session_state.messages.append({"role": "user", "content": user_text})
+                st.session_state.pending_user_text = user_text
+                st.session_state.chat_is_responding = True
+                st.rerun()
+
+            if st.session_state.chat_is_responding and st.session_state.pending_user_text:
+                pending_text = st.session_state.pending_user_text
+
+                try:
+                    with st.spinner("WR Assistant sta rispondendo..."):
                         api_key = st.session_state.get("gemini_api_key")
                         if not api_key:
-                            st.session_state.messages.append({"role": "assistant", "content": "⚠️ Configura prima la API Key nelle impostazioni."})
-                            st.rerun()
-                            
-                        genai.configure(api_key=api_key)
-                        utm_ctx = st.session_state.utm_context
+                            st.session_state.messages.append(
+                                {"role": "assistant", "content": "Configura prima la API Key nelle impostazioni."}
+                            )
+                        else:
+                            genai.configure(api_key=api_key)
+                            utm_ctx = st.session_state.utm_context
 
-                        # --- TOOLS ---
-                        def tool_list_properties() -> Any:
-                            cache_key = "list_properties"
-                            if cache_key in utm_ctx["tool_cache"]:
-                                return utm_ctx["tool_cache"][cache_key]
-                            result = ga4_mcp_tools.get_account_summaries(creds)
-                            utm_ctx["tool_cache"][cache_key] = result
-                            return result
+                            # --- TOOLS ---
+                            def tool_list_properties() -> Any:
+                                cache_key = "list_properties"
+                                if cache_key in utm_ctx["tool_cache"]:
+                                    return utm_ctx["tool_cache"][cache_key]
+                                result = ga4_mcp_tools.get_account_summaries(creds)
+                                utm_ctx["tool_cache"][cache_key] = result
+                                return result
 
-                        def tool_get_metadata(property_id: str) -> Any:
-                            return ga4_mcp_tools.get_property_details(property_id, creds)
+                            def tool_get_metadata(property_id: str) -> Any:
+                                return ga4_mcp_tools.get_property_details(property_id, creds)
 
-                        def tool_run_report(property_id: str, dimensions: List[str], metrics: List[str], start_date: str = "30daysAgo", end_date: str = "today") -> Any:
-                            cache_key = f"run_report:{property_id}:{dimensions}:{metrics}:{start_date}:{end_date}"
-                            if cache_key in utm_ctx["tool_cache"]:
-                                return utm_ctx["tool_cache"][cache_key]
-                            result = ga4_mcp_tools.run_report(property_id, dimensions, metrics, [{"start_date": start_date, "end_date": end_date}], creds)
-                            utm_ctx["tool_cache"][cache_key] = result
-                            return result
+                            def tool_run_report(property_id: str, dimensions: List[str], metrics: List[str], start_date: str = "30daysAgo", end_date: str = "today") -> Any:
+                                cache_key = f"run_report:{property_id}:{dimensions}:{metrics}:{start_date}:{end_date}"
+                                if cache_key in utm_ctx["tool_cache"]:
+                                    return utm_ctx["tool_cache"][cache_key]
+                                result = ga4_mcp_tools.run_report(property_id, dimensions, metrics, [{"start_date": start_date, "end_date": end_date}], creds)
+                                utm_ctx["tool_cache"][cache_key] = result
+                                return result
 
-                        def tool_run_realtime_report(property_id: str, dimensions: List[str], metrics: List[str]) -> Any:
-                            return ga4_mcp_tools.run_realtime_report(property_id, dimensions, metrics, creds)
+                            def tool_run_realtime_report(property_id: str, dimensions: List[str], metrics: List[str]) -> Any:
+                                return ga4_mcp_tools.run_realtime_report(property_id, dimensions, metrics, creds)
 
-                        def tool_list_ads_links(property_id: str) -> Any:
-                            return ga4_mcp_tools.list_google_ads_links(property_id, creds)
+                            def tool_list_ads_links(property_id: str) -> Any:
+                                return ga4_mcp_tools.list_google_ads_links(property_id, creds)
 
-                        def tool_guess_property_from_url(destination_url: str) -> Dict[str, Any]:
-                            cache_key = f"guess_property:{destination_url}"
-                            if cache_key in utm_ctx["tool_cache"]:
-                                return utm_ctx["tool_cache"][cache_key]
-                            url = _normalize_destination_url(destination_url)
-                            host = urlparse(url).netloc.lower().replace("www.", "")
-                            host_root = host.split(":")[0]
-                            summaries = ga4_mcp_tools.get_account_summaries(creds)
-                            props = []
-                            if isinstance(summaries, dict):
-                                for k in ["propertySummaries", "properties", "items", "data"]:
-                                    if k in summaries and isinstance(summaries[k], list):
-                                        props = summaries[k]; break
-                                if not props and "accountSummaries" in summaries:
-                                    for acc in summaries["accountSummaries"]:
+                            def tool_guess_property_from_url(destination_url: str) -> Dict[str, Any]:
+                                cache_key = f"guess_property:{destination_url}"
+                                if cache_key in utm_ctx["tool_cache"]:
+                                    return utm_ctx["tool_cache"][cache_key]
+                                url = _normalize_destination_url(destination_url)
+                                host = urlparse(url).netloc.lower().replace("www.", "")
+                                host_root = host.split(":")[0]
+                                summaries = ga4_mcp_tools.get_account_summaries(creds)
+                                props = []
+                                if isinstance(summaries, dict):
+                                    for k in ["propertySummaries", "properties", "items", "data"]:
+                                        if k in summaries and isinstance(summaries[k], list):
+                                            props = summaries[k]
+                                            break
+                                    if not props and "accountSummaries" in summaries:
+                                        for acc in summaries["accountSummaries"]:
+                                            ps = acc.get("propertySummaries") or []
+                                            if isinstance(ps, list):
+                                                props.extend(ps)
+                                elif isinstance(summaries, list):
+                                    for acc in summaries:
                                         ps = acc.get("propertySummaries") or []
-                                        if isinstance(ps, list): props.extend(ps)
-                            elif isinstance(summaries, list):
-                                for acc in summaries:
-                                    ps = acc.get("propertySummaries") or []
-                                    if isinstance(ps, list): props.extend(ps)
-                            candidates = []
-                            for p in props:
-                                display = (p.get("displayName") or p.get("name") or "").lower()
-                                pid = ""
-                                m = re.search(r"properties/(\d+)", p.get("name") or "")
-                                if m: pid = m.group(1)
-                                score = 0
-                                if host_root and host_root in display: score += 3
-                                candidates.append({"property_id": pid, "display_name": p.get("displayName"), "score": score})
-                            candidates.sort(key=lambda x: x["score"], reverse=True)
-                            result = {"candidates": candidates[:5], "domain": host_root}
-                            utm_ctx["tool_cache"][cache_key] = result
-                            return result
+                                        if isinstance(ps, list):
+                                            props.extend(ps)
 
-                        my_tools = [tool_list_properties, tool_get_metadata, tool_run_report, tool_run_realtime_report, tool_list_ads_links, tool_guess_property_from_url]
+                                candidates = []
+                                for p in props:
+                                    display = (p.get("displayName") or p.get("name") or "").lower()
+                                    pid = ""
+                                    m = re.search(r"properties/(\d+)", p.get("name") or "")
+                                    if m:
+                                        pid = m.group(1)
+                                    score = 0
+                                    if host_root and host_root in display:
+                                        score += 3
+                                    candidates.append(
+                                        {"property_id": pid, "display_name": p.get("displayName"), "score": score}
+                                    )
 
-                        # --- Dynamic system instruction ---
-                        current_date = datetime.now().strftime("%Y-%m-%d")
-                        system_instruction = _build_system_instruction(utm_ctx, current_date)
+                                candidates.sort(key=lambda x: x["score"], reverse=True)
+                                result = {"candidates": candidates[:5], "domain": host_root}
+                                utm_ctx["tool_cache"][cache_key] = result
+                                return result
 
-                        # --- History ---
-                        history = []
-                        for msg in st.session_state.messages:
-                            if msg == st.session_state.messages[-1]: continue
-                            role = "user" if msg["role"] == "user" else "model"
-                            text = msg.get("raw_content", msg["content"])
-                            history.append({"role": role, "parts": [text]})
+                            my_tools = [
+                                tool_list_properties,
+                                tool_get_metadata,
+                                tool_run_report,
+                                tool_run_realtime_report,
+                                tool_list_ads_links,
+                                tool_guess_property_from_url,
+                            ]
 
-                        response_text, _ = get_gemini_response_safe(user_text, history, my_tools, system_instruction, api_key)
-                        cleaned = clean_bot_response(response_text)
-                        
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": cleaned,
-                            "raw_content": response_text,
-                        })
+                            # --- Dynamic system instruction ---
+                            current_date = datetime.now().strftime("%Y-%m-%d")
+                            system_instruction = _build_system_instruction(utm_ctx, current_date)
 
-                        # Update conversation context
-                        _update_context_from_response(response_text, user_text, utm_ctx)
+                            # --- History ---
+                            history = []
+                            for msg in st.session_state.messages:
+                                if msg == st.session_state.messages[-1]:
+                                    continue
+                                role = "user" if msg["role"] == "user" else "model"
+                                text = msg.get("raw_content", msg["content"])
+                                history.append({"role": role, "parts": [text]})
 
-                        st.rerun()
+                            response_text, _ = get_gemini_response_safe(
+                                pending_text,
+                                history,
+                                my_tools,
+                                system_instruction,
+                                api_key,
+                            )
+                            cleaned = clean_bot_response(response_text)
 
-                    except Exception as e:
-                        st.session_state.messages.append({"role": "assistant", "content": f"❌ Errore: {str(e)}"})
-                        st.rerun()
+                            st.session_state.messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": cleaned,
+                                    "raw_content": response_text,
+                                }
+                            )
+
+                            # Update conversation context
+                            _update_context_from_response(response_text, pending_text, utm_ctx)
+
+                except Exception as e:
+                    st.session_state.messages.append({"role": "assistant", "content": f"Errore: {str(e)}"})
+                finally:
+                    st.session_state.chat_is_responding = False
+                    st.session_state.pending_user_text = None
+
+                st.rerun()
