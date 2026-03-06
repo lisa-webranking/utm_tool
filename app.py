@@ -1965,6 +1965,48 @@ if __name__ == "__main__":
          except:
              pass
 
+    # Fallback to web auth if token.json is not present (or we are in Cloud)
+    if not st.session_state.credentials:
+        query_params = st.query_params
+        if "code" in query_params:
+            auth_code = query_params["code"]
+            flow = get_oauth_flow()
+            if flow:
+                try:
+                    flow.fetch_token(code=auth_code)
+                    creds = flow.credentials
+                    st.session_state.credentials = creds
+                    
+                    # Store as primitive dict to be completely safe with st.session_state
+                    st.session_state.google_credentials = {
+                        'token': creds.token,
+                        'refresh_token': creds.refresh_token,
+                        'token_uri': creds.token_uri,
+                        'client_id': creds.client_id,
+                        'client_secret': creds.client_secret,
+                        'scopes': creds.scopes
+                    }
+                    
+                    # Clean up URL params so we don't re-trigger the auth flow
+                    st.query_params.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore durante l'autenticazione: {e}")
+            else:
+                st.error("Configurazione Flow mancante durante la validazione del codice.")
+
+    # Restoring from session state primitive dict if page reloads
+    if not st.session_state.credentials and "google_credentials" in st.session_state:
+        g_creds = st.session_state.google_credentials
+        st.session_state.credentials = Credentials(
+            token=g_creds.get('token'),
+            refresh_token=g_creds.get('refresh_token'),
+            token_uri=g_creds.get('token_uri'),
+            client_id=g_creds.get('client_id'),
+            client_secret=g_creds.get('client_secret'),
+            scopes=g_creds.get('scopes')
+        )
+
     # Routing
     if st.session_state.credentials:
         show_dashboard()
