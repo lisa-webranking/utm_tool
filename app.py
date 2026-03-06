@@ -21,7 +21,7 @@ from google.analytics.data import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Metric, Dimension
 
 import google.generativeai as genai
-from googleapi import get_user_email, get_persistent_api_key, save_persistent_api_key
+from googleapi import get_persistent_api_key, save_persistent_api_key
 import ga4_mcp_tools # Import tools module
 from functools import partial
 
@@ -647,58 +647,117 @@ SCOPES = [
     'openid'
 ]
 
-def do_oauth_flow():
-    """Effettua il flow di autenticazione Google OAuth 2.0 Locale"""
-    creds = None
+def get_oauth_flow():
+    """Configura l'oggetto Flow per Web OAuth usando i Secrets o il json locale"""
+    # Prova a prendere le configurazioni dai Secrets di Streamlit
+    if "gcp_service_account" in st.secrets:
+        # Se c'è un service account configurato nei secrets, potresti saltare OAuth, 
+        # ma per il flusso utente richiesto presupponiamo OAuth Client ID Web App.
+        # Fallback al json locale per la configurazione se nei secrets mettiamo l'intero JSON client_secrets
+        pass
     
-    # Percorsi assoluti
+    # Per ora gestiamo il file locale o i secrets (se configurati come dict nel toml)
     base_path = os.path.dirname(os.path.abspath(__file__))
-    token_path = os.path.join(base_path, 'token.json')
     secrets_path = os.path.join(base_path, 'client_secrets.json')
     
-    # Token.json memorizza i token di accesso e refresh utente
-    if os.path.exists(token_path):
-        try:
-            creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-        except Exception:
-            # Token malformato o scaduto: eliminalo e riparte dall'OAuth
-            os.remove(token_path)
-            creds = None
+    # Determina la redirect URI dinamica dalla URL dell'app Streamlit, o usa un default
+    # Notare che Streamlit Cloud su redirect tipicamente usa l'URL base.
+    # In locale useremo http://localhost:8501
     
-    # Se non ci sono credenziali valide, fai il login
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+    # Ottieni i parametri attuali per capire se siamo in callback
+    query_params = st.query_params
+    
+    if os.path.exists(secrets_path):
+        import json
+        with open(secrets_path, 'r') as f:
+            client_config = json.load(f)
+    elif "google_oauth" in st.secrets:
+        # Crea dict dal toml
+        client_config = {"web": dict(st.secrets["google_oauth"])}
+    else:
+        st.error("Configurazione OAuth (client_secrets.json o st.secrets) mancante!")
+        return None
+
+    from google_auth_oauthlib.flow import Flow
+    flow = Flow.from_client_config(
+        client_config,
+        scopes=SCOPES
+    )
+    
+    # Costruisci redirect_uri base 
+    # (Attenzione: DEVE coincidere esattamente con quella registrata per l'app su Google Cloud)
+    # Su Streamlit Cloud è un po' tricky ottenere il proprio URL dinamicamente via codice in modo affidabile,
+    # quindi se impostato in st.secrets["redirect_uri"] usiamo quello, altrimenti cerchiamo di indovinarlo.
+    if "redirect_uri" in st.secrets:
+        redirect_uri = st.secrets["redirect_uri"]
+    else:
+        # Assume test locale
+        redirect_uri = 'http://localhost:8501/'
+        
+    flow.redirect_uri = redirect_uri
+    return flow
+
+def do_oauth_flow():
+    """Gestisce il flow di autenticazione Google OAuth 2.0 Web"""
+    
+    # Controlla se le credenziali sono già in sessione
+    if 'google_credentials' in st.session_state and st.session_state.google_credentials:
+        creds = Credentials(
+            token=st.session_state.google_credentials['token'],
+            refresh_token=st.session_state.google_credentials.get('refresh_token'),
+            token_uri=st.session_state.google_credentials.get('token_uri'),
+            client_id=st.session_state.google_credentials.get('client_id'),
+            client_secret=st.session_state.google_credentials.get('client_secret'),
+            scopes=st.session_state.google_credentials.get('scopes')
+        )
+        
+        if creds.valid:
+            return creds
+        if creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
+                # Aggiorna sessione
+                st.session_state.google_credentials['token'] = creds.token
+                return creds
             except Exception:
-                os.remove(token_path)
-                return do_oauth_flow()
-        else:
-            if not os.path.exists(secrets_path):
-                st.error(f"File '{secrets_path}' non trovato! Scaricalo da Google Cloud Console.")
-                return None
+                st.session_state.google_credentials = None
                 
-            flow = InstalledAppFlow.from_client_secrets_file(
-                secrets_path, SCOPES)
-            # Usa una porta fissa (8080) per evitare mismatch con le URI autorizzate in Google Cloud
-            try:
-                creds = flow.run_local_server(
-                    port=8080,
-                    access_type='offline',
-                    prompt='consent'  # forza Google a restituire sempre il refresh_token
-                )
-            except OSError as e:
-                if "Address already in use" in str(e) or "[WinError 10048]" in str(e):
-                    st.error("❌ Errore: La porta 8080 è occupata. Probabilmente un'altra istanza di login è rimasta appesa. Riprova tra qualche secondo o chiudi i processi python.exe dal Task Manager.")
-                    return None
-                else:
-                    raise e
-        
-        # Salva le credenziali per il prossimo avvio
-        with open(token_path, 'w') as token:
-            token.write(creds.to_json())
+    # Verifica se stiamo tornando da un redirect di login
+    query_params = st.query_params
+    if 'code' in query_params:
+        flow = get_oauth_flow()
+        if not flow:
+            return None
             
-    return creds
+        try:
+            # Recupera il token
+            code = query_params['code']
+            flow.fetch_token(code=code)
+            creds = flow.credentials
+            
+            # Salva credenziali scalari compatibili con JSON in session_state, NO file
+            st.session_state.google_credentials = {
+                'token': creds.token,
+                'refresh_token': creds.refresh_token,
+                'token_uri': creds.token_uri,
+                'client_id': creds.client_id,
+                'client_secret': creds.client_secret,
+                'scopes': creds.scopes
+            }
+            
+            # Ripulisci l'URL (rimuovi ?code=...) così se refresha la pagina non va in crash
+            import urllib.parse
+            if hasattr(st, "query_params"):
+                st.query_params.clear()
+            else:
+                st.experimental_set_query_params() # per vecchie versioni streamlit
+                
+            st.rerun() # Forza rerun per mostrare UI pulita
+        except Exception as e:
+            st.error(f"Errore durante l'accesso: {e}")
+            
+    # Se arriva qui, serve fare il login
+    return None
 
 def get_ga4_accounts_structure(creds):
     """Recupera la struttura Account -> Properties usando ga4_mcp_tools"""
@@ -896,22 +955,13 @@ def is_valid_url(url):
     regex = re.compile(r'^https?://(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|localhost|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\d+)?(?:/?|[/?]\S+)$', re.IGNORECASE)
     return re.match(regex, url) is not None
 
-HISTORY_FILE = Path(__file__).with_name("utm_history.json")
-
 def load_utm_history():
-    if not HISTORY_FILE.exists():
-        return []
-    try:
-        data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
+    if 'utm_history' not in st.session_state:
+        st.session_state.utm_history = []
+    return st.session_state.utm_history
 
 def save_utm_history(items):
-    try:
-        HISTORY_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    st.session_state.utm_history = items
 
 def infer_expected_channel_group(utm_medium: str) -> str:
     m = normalize_medium_token(utm_medium)
@@ -1112,11 +1162,13 @@ def show_login_page():
         st.write("")
         st.write("")
         
-        if st.button("🔐 Login con Google", use_container_width=True, type="primary"):
-            creds = do_oauth_flow()
-            if creds:
-                st.session_state.credentials = creds
-                st.rerun()
+        # Link OAuth generato web-side
+        flow = get_oauth_flow()
+        if flow:
+            auth_url, _ = flow.authorization_url(prompt='consent')
+            st.markdown(f'<a href="{auth_url}" target="_self" style="display:block; text-align:center; padding:12px 24px; background-color:#1a73e8; color:white; border-radius:8px; text-decoration:none; font-weight:bold; font-size:16px;">🔐 Login con Google Analytics</a>', unsafe_allow_html=True)
+        else:
+            st.error("Configurazione Google Auth mancante.")
 
 # --- DASHBOARD PAGE ---
 def show_dashboard():
@@ -1152,8 +1204,8 @@ def show_dashboard():
                         del st.session_state.user_email
                     if "gemini_api_key" in st.session_state:
                         del st.session_state.gemini_api_key
-                    if os.path.exists("token.json"):
-                        os.remove("token.json")
+                    if "google_credentials" in st.session_state:
+                        del st.session_state.google_credentials
                     st.rerun()
         else:
             if st.button("Account ▾", key="user_menu_btn", use_container_width=True):
@@ -1169,8 +1221,8 @@ def show_dashboard():
                         del st.session_state.user_email
                     if "gemini_api_key" in st.session_state:
                         del st.session_state.gemini_api_key
-                    if os.path.exists("token.json"):
-                        os.remove("token.json")
+                    if "google_credentials" in st.session_state:
+                        del st.session_state.google_credentials
                     st.rerun()
 
     # --- SETTINGS MODAL ---

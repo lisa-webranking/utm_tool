@@ -12,29 +12,17 @@ def get_user_email(creds):
         return None
 
 def get_persistent_api_key(email):
-    """Recupera la chiave API salvata per l'utente"""
+    """Recupera la chiave API salvata per l'utente dalla session_state"""
     if not email: return None
-    keys_path = os.path.join(os.path.dirname(__file__), 'api_keys.json')
-    if os.path.exists(keys_path):
-        with open(keys_path, 'r') as f:
-            try:
-                keys = json.load(f)
-                return keys.get(email)
-            except:
-                return None
+    import streamlit as st
+    if 'user_gemini_api_keys' in st.session_state:
+        return st.session_state.user_gemini_api_keys.get(email)
     return None
 
 def save_persistent_api_key(email, key):
-    """Salva la chiave API per l'utente"""
+    """Salva la chiave API per l'utente nella session_state"""
     if not email or not key: return
-    keys_path = os.path.join(os.path.dirname(__file__), 'api_keys.json')
-    keys = {}
-    if os.path.exists(keys_path):
-        with open(keys_path, 'r') as f:
-            try:
-                keys = json.load(f)
-            except:
-                keys = {}
-    keys[email] = key
-    with open(keys_path, 'w') as f:
-        json.dump(keys, f)
+    import streamlit as st
+    if 'user_gemini_api_keys' not in st.session_state:
+        st.session_state.user_gemini_api_keys = {}
+    st.session_state.user_gemini_api_keys[email] = key
