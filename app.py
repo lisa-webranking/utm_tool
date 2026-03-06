@@ -1166,7 +1166,7 @@ def show_login_page():
         flow = get_oauth_flow()
         if flow:
             auth_url, _ = flow.authorization_url(prompt='consent')
-            st.markdown(f'<a href="{auth_url}" target="_blank" style="display:block; text-align:center; padding:12px 24px; background-color:#1a73e8; color:white; border-radius:8px; text-decoration:none; font-weight:bold; font-size:16px;">🔐 Login con Google Analytics</a>', unsafe_allow_html=True)
+            st.link_button("🔐 Login con Google Analytics", auth_url, type="primary", use_container_width=True)
         else:
             st.error("Configurazione Google Auth mancante.")
 
