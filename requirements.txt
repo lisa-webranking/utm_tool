@@ -7,3 +7,6 @@ google-api-python-client
 google-auth
 google-analytics-admin
 google-generativeai
+pypdf
+openpyxl
+xlrd

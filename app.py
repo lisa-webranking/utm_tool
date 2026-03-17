@@ -3,9 +3,11 @@ import streamlit.components.v1 as components
 import pandas as pd
 import os
 import json
+import hashlib
+import hmac
 from datetime import datetime, timedelta
 from slugify import slugify
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode, urlunparse
 
 import re
 import html as html_lib  # per escapare valori UTM nell'HTML
@@ -30,6 +32,20 @@ from chatbot_ui import render_chatbot_interface
 
 # --- CONFIGURAZIONE ---
 st.set_page_config(page_title="Universal UTM Governance", layout="wide")
+
+
+def _get_config_value(name: str) -> str:
+    env_val = os.getenv(name, "").strip()
+    if env_val:
+        return env_val
+    try:
+        return str(st.secrets.get(name, "")).strip()
+    except Exception:
+        return ""
+
+
+CLIENT_LINK_SECRET = _get_config_value("CLIENT_LINK_SECRET")
+CLIENT_CONFIG_DIR = Path(__file__).with_name("client_configs")
 
 # --- CSS (STILE CLEAN + CHECKER CORRETTO) ---
 st.markdown("""
@@ -880,6 +896,10 @@ def normalize_token(text):
     if not text: return ""
     return slugify(text, separator="-", lowercase=True)
 
+
+def normalize_client_id(value: str) -> str:
+    return slugify((value or "").strip(), separator="_")
+
 def normalize_medium_token(text):
     """Normalizza utm_medium preservando underscore GA4 (es. social_paid)."""
     if not text:
@@ -954,6 +974,197 @@ def filter_options_by_source_mode(options, mode, field):
 def is_valid_url(url):
     regex = re.compile(r'^https?://(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|localhost|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\d+)?(?:/?|[/?]\S+)$', re.IGNORECASE)
     return re.match(regex, url) is not None
+
+
+def _client_config_path(client_id: str) -> Path:
+    return CLIENT_CONFIG_DIR / f"{normalize_client_id(client_id)}.json"
+
+
+def load_client_config(client_id: str):
+    cid = normalize_client_id(client_id)
+    if not cid:
+        return None
+    path = _client_config_path(cid)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def list_saved_client_ids() -> list:
+    CLIENT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    return sorted({p.stem for p in CLIENT_CONFIG_DIR.glob("*.json")})
+
+
+def sign_client_id(client_id: str) -> str:
+    cid = normalize_client_id(client_id)
+    if not cid or not CLIENT_LINK_SECRET:
+        return ""
+    return hmac.new(CLIENT_LINK_SECRET.encode("utf-8"), cid.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def verify_client_signature(client_id: str, signature: str) -> bool:
+    cid = normalize_client_id(client_id)
+    sig = str(signature or "").strip()
+    if not cid or not sig or not CLIENT_LINK_SECRET:
+        return False
+    expected = sign_client_id(cid)
+    return bool(expected) and hmac.compare_digest(expected, sig)
+
+
+def get_client_lock_from_query_params():
+    def _qp(name: str) -> str:
+        raw = st.query_params.get(name, "")
+        if isinstance(raw, (list, tuple)):
+            raw = raw[0] if raw else ""
+        return str(raw or "").strip()
+
+    client_id = normalize_client_id(_qp("client_id"))
+    sig = _qp("sig")
+    if not client_id:
+        return None, ""
+
+    def _verify_with_saved_link(cid: str, signature: str) -> bool:
+        cfg = load_client_config(cid)
+        if not cfg:
+            return False
+        shared_link = str(cfg.get("shared_link", "")).strip()
+        if not shared_link:
+            return False
+        try:
+            q = parse_qs(urlparse(shared_link).query)
+            saved_cid = normalize_client_id((q.get("client_id") or [""])[0])
+            saved_sig = str((q.get("sig") or [""])[0] or "").strip()
+            return bool(saved_cid and saved_sig and saved_cid == cid and hmac.compare_digest(saved_sig, signature))
+        except Exception:
+            return False
+
+    if CLIENT_LINK_SECRET and verify_client_signature(client_id, sig):
+        return client_id, ""
+    if _verify_with_saved_link(client_id, sig):
+        return client_id, ""
+    if not CLIENT_LINK_SECRET:
+        return None, "CLIENT_LINK_SECRET non configurato: impossibile verificare il link cliente."
+    return None, "Link cliente non valido o firma scaduta/non corretta."
+
+
+def _split_rule_values(value: str) -> list:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    return [x.strip() for x in re.split(r"[,\|;/]+", raw) if str(x).strip()]
+
+
+def extract_client_rule_values(client_config: dict):
+    rows = (client_config or {}).get("rules_rows", []) or []
+    source_keys = {"utm_source", "source"}
+    medium_keys = {"utm_medium", "medium"}
+    campaign_type_keys = {"campaigntype", "campaign_type", "type"}
+    sources = set()
+    mediums = set()
+    campaign_types = set()
+
+    # 1) parsing diretto per colonne già nominate
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key, raw_val in row.items():
+            norm_key = str(key).strip().lower().replace(" ", "_")
+            tokens = _split_rule_values(raw_val)
+            if not tokens:
+                continue
+            if norm_key in source_keys:
+                for t in tokens:
+                    v = normalize_token(t)
+                    if v:
+                        sources.add(v)
+            if norm_key in medium_keys:
+                for t in tokens:
+                    v = normalize_medium_token(t)
+                    if v:
+                        mediums.add(v)
+            if norm_key in campaign_type_keys:
+                for t in tokens:
+                    v = normalize_token(t)
+                    if v:
+                        campaign_types.add(v)
+
+    # 2) parsing tabellare per file excel importati con Unnamed:* e header in riga
+    role_map_by_sheet = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sheet_name = str(row.get("__sheet_name", "")).strip().lower() or "__default__"
+        current_map = dict(role_map_by_sheet.get(sheet_name, {}))
+        header_detected = False
+        for key, raw_val in row.items():
+            val_norm = normalize_token(str(raw_val or ""))
+            if val_norm in source_keys:
+                current_map[str(key)] = "source"
+                header_detected = True
+            elif val_norm in medium_keys:
+                current_map[str(key)] = "medium"
+                header_detected = True
+            elif val_norm in campaign_type_keys:
+                current_map[str(key)] = "campaign_type"
+                header_detected = True
+        if header_detected:
+            role_map_by_sheet[sheet_name] = current_map
+            continue
+        if not current_map:
+            continue
+        for col_key, role in current_map.items():
+            for t in _split_rule_values(row.get(col_key, "")):
+                norm_t = normalize_token(t)
+                if not norm_t:
+                    continue
+                if norm_t in source_keys or norm_t in medium_keys or norm_t in campaign_type_keys:
+                    continue
+                if role == "source":
+                    sources.add(norm_t)
+                elif role == "medium":
+                    mediums.add(normalize_medium_token(t))
+                elif role == "campaign_type":
+                    campaign_types.add(norm_t)
+    return sorted(sources), sorted(mediums), sorted(campaign_types)
+
+
+def build_client_rules_text_for_chatbot(client_config: dict) -> str:
+    if not client_config:
+        return ""
+    cid = normalize_client_id(client_config.get("client_id", ""))
+    sources, mediums, campaign_types = extract_client_rule_values(client_config)
+    lines = [f"- client_id: {cid}"] if cid else []
+    ga4_name = str(client_config.get("ga4_client_name", "")).strip()
+    if ga4_name:
+        lines.append(f"- cliente GA4: {ga4_name}")
+    if sources:
+        lines.append(f"- utm_source consentiti (esempi): {', '.join(sources[:20])}")
+    if mediums:
+        lines.append(f"- utm_medium consentiti (esempi): {', '.join(mediums[:20])}")
+    if campaign_types:
+        lines.append(f"- campaign_type usati: {', '.join(campaign_types[:20])}")
+    lines.append("- Evita valori fuori convenzione cliente se non esplicitamente richiesti.")
+    return "\n".join(lines)
+
+
+def resolve_locked_client_context(locked_client_id: str):
+    locked_cid = normalize_client_id(locked_client_id)
+    if not locked_cid:
+        return "", None, ""
+    direct = load_client_config(locked_cid)
+    if direct:
+        return locked_cid, direct, ""
+    candidates = [cid for cid in list_saved_client_ids() if locked_cid in cid or cid in locked_cid]
+    if candidates:
+        chosen = sorted(candidates, key=lambda x: (x != locked_cid, len(x)))[0]
+        cfg = load_client_config(chosen)
+        if cfg:
+            return chosen, cfg, f"Link cliente '{locked_cid}' agganciato alla configurazione '{chosen}'."
+    return locked_cid, None, ""
 
 def load_utm_history():
     if 'utm_history' not in st.session_state:
@@ -1041,6 +1252,7 @@ def save_chatbot_url_to_history(final_url: str, property_id: str = "") -> bool:
             "user_email": st.session_state.get("user_email", ""),
             "property_id": prop_id_raw,
             "property_name": property_name,
+            "client_id": st.session_state.get("active_client_id", ""),
             "campaign_name": campaign_name,
             "live_date": live_date,
             "utm_source": utm_source,
@@ -1189,6 +1401,14 @@ def show_dashboard():
     # --- INITIALIZE USER EMAIL AND API KEY ---
     if "user_email" not in st.session_state:
         st.session_state.user_email = get_user_email(st.session_state.credentials)
+    current_user_email = st.session_state.get("user_email", "")
+    cached_for_email = st.session_state.get("ga4_cache_user_email", "")
+    if current_user_email and cached_for_email != current_user_email:
+        st.session_state.pop("ga4_accounts", None)
+        for k in list(st.session_state.keys()):
+            if str(k).startswith("sources_") or str(k).startswith("mediums_") or str(k).startswith("source_medium_pairs_"):
+                st.session_state.pop(k, None)
+        st.session_state["ga4_cache_user_email"] = current_user_email
     
     if "gemini_api_key" not in st.session_state:
         # Try to load saved API key for this user
@@ -1220,6 +1440,8 @@ def show_dashboard():
                         del st.session_state.gemini_api_key
                     if "google_credentials" in st.session_state:
                         del st.session_state.google_credentials
+                    st.session_state.pop("ga4_accounts", None)
+                    st.session_state.pop("ga4_cache_user_email", None)
                     st.rerun()
         else:
             if st.button("Account ▾", key="user_menu_btn", use_container_width=True):
@@ -1237,6 +1459,8 @@ def show_dashboard():
                         del st.session_state.gemini_api_key
                     if "google_credentials" in st.session_state:
                         del st.session_state.google_credentials
+                    st.session_state.pop("ga4_accounts", None)
+                    st.session_state.pop("ga4_cache_user_email", None)
                     st.rerun()
 
     # --- SETTINGS MODAL ---
@@ -1331,6 +1555,29 @@ def show_dashboard():
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+    # --- CONTESTO CLIENTE ATTIVO DA LINK FIRMATO ---
+    locked_client_id = st.session_state.get("client_id_lock", "")
+    active_client_id = ""
+    active_client_config = None
+    lock_resolution_note = ""
+    if locked_client_id:
+        active_client_id, active_client_config, lock_resolution_note = resolve_locked_client_context(locked_client_id)
+    st.session_state["active_client_id"] = active_client_id or ""
+    st.session_state["active_client_config"] = active_client_config
+    st.session_state["active_client_rules_text"] = build_client_rules_text_for_chatbot(active_client_config)
+
+    if active_client_id:
+        if active_client_config:
+            st.info(f"Tool configurato sul cliente: {active_client_id}")
+            if lock_resolution_note:
+                st.caption(lock_resolution_note)
+            st.caption("Apri il chatbot con il pulsante WR in basso a destra.")
+        else:
+            st.warning(f"Nessuna configurazione trovata per il cliente bloccato: {active_client_id}")
+
+    if st.session_state.get("client_lock_error"):
+        st.warning(st.session_state.get("client_lock_error"))
     # --- TABS DI NAVIGAZIONE ---
     tab_builder, tab_checker, tab_history = st.tabs(["Build URL", "Check URL", "UTM History & Tracking"])
 
@@ -1347,6 +1594,9 @@ def show_dashboard():
 
         selected_prop_name = None
         sel_prop_id = None
+        is_locked_client_view = bool(st.session_state.get("client_id_lock"))
+        active_client_config = st.session_state.get("active_client_config") or {}
+        client_rule_sources, client_rule_mediums, _client_rule_campaign_types = extract_client_rule_values(active_client_config)
         prop_channels = ["Paid Search", "Paid Social", "Display", "Email", "Organic Social", "Affiliate", "Video", "Altro"]
         prop_config = {"default_country": "it", "expected_domain": ""}
         real_sources = []
@@ -1360,9 +1610,37 @@ def show_dashboard():
         accounts_structure = st.session_state.ga4_accounts
         if accounts_structure:
             account_names = [a["display_name"] for a in accounts_structure]
+            preferred_ga4_client_name = str(active_client_config.get("ga4_client_name", "")).strip()
+            selected_account = None
+            selected_account_name = ""
+            if preferred_ga4_client_name:
+                selected_account = next(
+                    (
+                        a for a in accounts_structure
+                        if str(a.get("display_name", "")).strip().lower() == preferred_ga4_client_name.lower()
+                    ),
+                    None
+                )
+                if not selected_account:
+                    selected_account = next(
+                        (
+                            a for a in accounts_structure
+                            if preferred_ga4_client_name.lower() in str(a.get("display_name", "")).strip().lower()
+                        ),
+                        None
+                    )
             with ga_col1:
-                selected_account_name = st.selectbox("GA4 Account", account_names)
-            selected_account = next((a for a in accounts_structure if a["display_name"] == selected_account_name), None)
+                if selected_account and is_locked_client_view:
+                    selected_account_name = str(selected_account.get("display_name", "")).strip()
+                    st.text_input(
+                        "GA4 Account",
+                        value=selected_account_name,
+                        disabled=True,
+                        key=f"builder_locked_account_{st.session_state.get('active_client_id', '') or 'none'}",
+                    )
+                else:
+                    selected_account_name = st.selectbox("GA4 Account", account_names)
+                    selected_account = next((a for a in accounts_structure if a["display_name"] == selected_account_name), None)
             if selected_account and selected_account["properties"]:
                 prop_map = {p["display_name"]: p["property_id"] for p in selected_account["properties"]}
                 with ga_col2:
@@ -1403,6 +1681,9 @@ def show_dashboard():
         else:
             st.warning("Nessun account GA4 trovato o accesso negato.")
 
+        st.session_state["builder_selected_property_id"] = str(sel_prop_id or "")
+        st.session_state["builder_selected_property_name"] = str(selected_prop_name or "")
+
         st.markdown('<div class="tilda-section">Your URL address</div>', unsafe_allow_html=True)
         url_col1, url_col2 = st.columns([0.16, 0.84], gap="small")
         with url_col1:
@@ -1437,12 +1718,16 @@ def show_dashboard():
             - Sii descrittivo ma conciso.
             - Preferisci i trattini (`-`) agli underscore (`_`) quando possibile.
             """)
-        source_mode = st.radio(
-            "Traffic source mode",
-            ["Custom values", "Google Ads", "Social", "Email"],
-            horizontal=True,
-            label_visibility="collapsed"
-        )
+        if is_locked_client_view:
+            source_mode = "Custom values"
+            st.caption("Modalità cliente attiva: opzioni filtrate da regole cliente.")
+        else:
+            source_mode = st.radio(
+                "Traffic source mode",
+                ["Custom values", "Google Ads", "Social", "Email"],
+                horizontal=True,
+                label_visibility="collapsed"
+            )
 
         source_default = ""
         medium_default = ""
@@ -1473,12 +1758,17 @@ def show_dashboard():
                 st.text_input(" ", value="utm_source", key="req_src_key", disabled=True)
             with s2:
                 normalized_sources = sorted({normalize_token(s) for s in real_sources if normalize_token(s)})
+                if is_locked_client_view and client_rule_sources:
+                    normalized_sources = sorted(set(client_rule_sources))
+                elif client_rule_sources:
+                    normalized_sources = sorted(set(normalized_sources + client_rule_sources))
                 if not normalized_sources and not selected_prop_name:
                     normalized_sources = sorted({normalize_token(s) for s in get_source_options() if normalize_token(s) and "altro" not in s.lower()})
                 source_options = filter_options_by_source_mode(normalized_sources, source_mode, "source")
                 if not source_options:
                     source_options = [normalize_token(source_default)] if normalize_token(source_default) else []
-                source_options = source_options + ["manuale"]
+                if not is_locked_client_view:
+                    source_options = source_options + ["manuale"]
                 source_default = normalize_token(final_input_source)
                 source_index = source_options.index(source_default) if source_default in source_options else 0
                 selected_source_value = st.selectbox(
@@ -1504,12 +1794,23 @@ def show_dashboard():
                         f'Suggerito: <b>{html_lib.escape(source_suggest)}</b></div>',
                         unsafe_allow_html=True
                     )
+                if client_rule_sources:
+                    src_norm = normalize_token(utm_source)
+                    if src_norm and src_norm not in set(client_rule_sources):
+                        st.markdown(
+                            '<div class="msg-warning">⚠️ Source non presente nelle regole cliente caricate.</div>',
+                            unsafe_allow_html=True
+                        )
             st.caption("Campaign medium")
             m1, m2 = st.columns([0.28, 0.72], gap="small")
             with m1:
                 st.text_input(" ", value="utm_medium", key="req_med_key", disabled=True)
             with m2:
                 normalized_mediums = sorted({normalize_medium_token(m) for m in real_mediums if normalize_medium_token(m)})
+                if is_locked_client_view and client_rule_mediums:
+                    normalized_mediums = sorted(set(client_rule_mediums))
+                elif client_rule_mediums:
+                    normalized_mediums = sorted(set(normalized_mediums + client_rule_mediums))
                 # Se c'e' property selezionata, medium dropdown basato su sessionMedium GA4.
                 # Usiamo fallback tabellare solo quando GA4 non e' selezionato.
                 if not normalized_mediums and not selected_prop_name:
@@ -1529,7 +1830,8 @@ def show_dashboard():
                     medium_options = filter_options_by_source_mode(normalized_mediums, source_mode, "medium")
                 if not medium_options:
                     medium_options = [normalize_medium_token(medium_default)] if normalize_medium_token(medium_default) else []
-                medium_options = medium_options + ["manuale"]
+                if not is_locked_client_view:
+                    medium_options = medium_options + ["manuale"]
                 default_medium_pick = normalize_medium_token(medium_default)
                 medium_index = medium_options.index(default_medium_pick) if default_medium_pick in medium_options else 0
                 selected_medium_value = st.selectbox(
@@ -1555,6 +1857,13 @@ def show_dashboard():
                         f'Suggerito: <b>{html_lib.escape(medium_suggest)}</b></div>',
                         unsafe_allow_html=True
                     )
+                if client_rule_mediums:
+                    med_norm = normalize_medium_token(utm_medium)
+                    if med_norm and med_norm not in set(client_rule_mediums):
+                        st.markdown(
+                            '<div class="msg-warning">⚠️ Medium non presente nelle regole cliente caricate.</div>',
+                            unsafe_allow_html=True
+                        )
             st.caption("Campaign name")
             c1, c2 = st.columns([0.28, 0.72], gap="small")
             with c1:
@@ -1949,7 +2258,10 @@ def show_dashboard():
     render_chatbot_interface(
         st.session_state.credentials,
         get_persistent_api_key,
-        save_chatbot_url_to_history
+        save_chatbot_url_to_history,
+        client_rules_text=st.session_state.get("active_client_rules_text", ""),
+        preferred_property_id=st.session_state.get("builder_selected_property_id", ""),
+        preferred_property_name=st.session_state.get("builder_selected_property_name", ""),
     )
 
 
@@ -1957,12 +2269,27 @@ def show_dashboard():
 if __name__ == "__main__":
     if "credentials" not in st.session_state:
         st.session_state.credentials = None
+    if "client_id_lock" not in st.session_state:
+        st.session_state.client_id_lock = ""
+    if "client_lock_error" not in st.session_state:
+        st.session_state.client_lock_error = ""
 
     # Scopes setup for profile info
     if 'https://www.googleapis.com/auth/userinfo.profile' not in SCOPES:
         SCOPES.append('https://www.googleapis.com/auth/userinfo.profile')
     if 'https://www.googleapis.com/auth/userinfo.email' not in SCOPES:
         SCOPES.append('https://www.googleapis.com/auth/userinfo.email')
+
+    # Lock cliente da query params firmati (persistente in sessione).
+    raw_client_qp = normalize_client_id(st.query_params.get("client_id", ""))
+    if raw_client_qp:
+        locked_client_id, lock_error = get_client_lock_from_query_params()
+        if locked_client_id:
+            st.session_state.client_id_lock = locked_client_id
+            st.session_state.client_lock_error = ""
+        elif lock_error:
+            st.session_state.client_lock_error = lock_error
+            st.session_state.client_id_lock = ""
 
     # Auto-login check
     base_path = os.path.dirname(os.path.abspath(__file__))
@@ -2033,4 +2360,6 @@ if __name__ == "__main__":
     if st.session_state.credentials:
         show_dashboard()
     else:
+        if st.session_state.get("client_lock_error"):
+            st.warning(st.session_state.get("client_lock_error"))
         show_login_page()

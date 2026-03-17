@@ -432,7 +432,13 @@ def _update_context_from_response(raw_response: str, user_input: str, context: d
         pass  # Never break the chat
 
 
-def _build_system_instruction(context: dict, current_date: str) -> str:
+def _build_system_instruction(
+    context: dict,
+    current_date: str,
+    client_rules_text: str = "",
+    preferred_property_id: str = "",
+    preferred_property_name: str = "",
+) -> str:
     """
     Builds the system instruction with static rules, skill guidelines,
     and dynamic conversation state.
@@ -455,6 +461,27 @@ def _build_system_instruction(context: dict, current_date: str) -> str:
     next_desc = step_descriptions.get(next_step, "Genera il link finale completo (step 8)")
 
     ga4_val = context.get("ga4_property_id") or "non ancora selezionata"
+    client_rules_block = ""
+    if client_rules_text:
+        client_rules_block = f"""
+REGOLE CLIENTE (PRIORITARIE)
+- Applica queste regole specifiche del cliente prima dei mapping generici.
+- Se ci sono conflitti tra regole generiche e regole cliente, vincono le regole cliente.
+{client_rules_text}
+"""
+    property_preselection_block = ""
+    preferred_pid = str(preferred_property_id or "").replace("properties/", "").strip()
+    preferred_label = str(preferred_property_name or "").strip()
+    if preferred_pid:
+        chosen_label = preferred_label or f"properties/{preferred_pid}"
+        property_preselection_block = f"""
+PROPERTY CLIENTE PRESELEZIONATA (DEFAULT OPERATIVA)
+- Property corrente selezionata nel Builder: {chosen_label} (properties/{preferred_pid}).
+- NON chiedere all'utente di scegliere la property.
+- Usa questa property come riferimento iniziale.
+- Se l'utente indica chiaramente una country/property diversa, aggiorna il riferimento e prosegui senza bloccare.
+- Se GA4 non è accessibile (permessi mancanti/errore), continua con le regole cliente da file UTM senza fermare il flusso.
+"""
 
     base = f"""Sei WR Assistant, un esperto nella generazione di parametri UTM.
 Oggi è il {current_date}.
@@ -464,6 +491,8 @@ Guidare l'utente a creare un URL tracciato che:
 - rispetti le regole UTM definite
 - sia coerente con lo storico GA4 (quando utile)
 - finisca nel canale corretto secondo il channel grouping PRIMARIO della property
+{client_rules_block}
+{property_preselection_block}
 
 REGOLE VISIVE
 1) Solo testo semplice (no HTML, no markdown complesso, no blocchi di codice).
@@ -654,7 +683,14 @@ def get_gemini_response_safe(
 # -------------------------
 # Main UI
 # -------------------------
-def render_chatbot_interface(creds, api_key_func=None, history_save_func=None) -> None:
+def render_chatbot_interface(
+    creds,
+    api_key_func=None,
+    history_save_func=None,
+    client_rules_text: str = "",
+    preferred_property_id: str = "",
+    preferred_property_name: str = "",
+) -> None:
     """
     Renderizza il widget Chatbot in modalità Floating (FAB + Window).
     """
@@ -685,6 +721,9 @@ def render_chatbot_interface(creds, api_key_func=None, history_save_func=None) -
             "ga4_property_id": None,
             "tool_cache": {},
         }
+    preferred_pid_ctx = str(preferred_property_id or "").replace("properties/", "").strip()
+    if preferred_pid_ctx:
+        st.session_state.utm_context["ga4_property_id"] = preferred_pid_ctx
 
     # Carica icona
     base_path = os.path.dirname(os.path.abspath(__file__))
@@ -1068,22 +1107,34 @@ def render_chatbot_interface(creds, api_key_func=None, history_save_func=None) -
                                                 props.extend(ps)
                                 elif isinstance(summaries, list):
                                     for acc in summaries:
-                                        ps = acc.get("propertySummaries") or []
+                                        ps = acc.get("propertySummaries") or acc.get("properties") or []
                                         if isinstance(ps, list):
                                             props.extend(ps)
 
                                 candidates = []
                                 for p in props:
-                                    display = (p.get("displayName") or p.get("name") or "").lower()
+                                    display = (
+                                        p.get("displayName")
+                                        or p.get("display_name")
+                                        or p.get("name")
+                                        or ""
+                                    ).lower()
                                     pid = ""
-                                    m = re.search(r"properties/(\d+)", p.get("name") or "")
+                                    pid_raw = str(p.get("name") or p.get("property_id") or "")
+                                    m = re.search(r"properties/(\d+)", pid_raw)
                                     if m:
                                         pid = m.group(1)
+                                    elif re.fullmatch(r"\d+", pid_raw.strip()):
+                                        pid = pid_raw.strip()
                                     score = 0
                                     if host_root and host_root in display:
                                         score += 3
                                     candidates.append(
-                                        {"property_id": pid, "display_name": p.get("displayName"), "score": score}
+                                        {
+                                            "property_id": pid,
+                                            "display_name": p.get("displayName") or p.get("display_name"),
+                                            "score": score,
+                                        }
                                     )
 
                                 candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -1120,7 +1171,13 @@ def render_chatbot_interface(creds, api_key_func=None, history_save_func=None) -
 
                             # --- Dynamic system instruction ---
                             current_date = datetime.now().strftime("%Y-%m-%d")
-                            system_instruction = _build_system_instruction(utm_ctx, current_date)
+                            system_instruction = _build_system_instruction(
+                                utm_ctx,
+                                current_date,
+                                client_rules_text=client_rules_text,
+                                preferred_property_id=preferred_property_id,
+                                preferred_property_name=preferred_property_name,
+                            )
 
                             # --- History ---
                             history = []
