@@ -8,6 +8,7 @@ import hmac
 from datetime import datetime, timedelta
 from slugify import slugify
 from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode, urlunparse
+from io import BytesIO
 
 import re
 import html as html_lib  # per escapare valori UTM nell'HTML
@@ -20,7 +21,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.analytics.admin import AnalyticsAdminServiceClient
 from google.analytics.data import BetaAnalyticsDataClient
-from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Metric, Dimension
+from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Metric, Dimension, OrderBy
 
 import google.generativeai as genai
 from googleapi import get_persistent_api_key, save_persistent_api_key, get_user_email
@@ -50,38 +51,110 @@ CLIENT_CONFIG_DIR = Path(__file__).with_name("client_configs")
 # --- CSS (STILE CLEAN + CHECKER CORRETTO) ---
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+
     :root {
-        --bg-soft: #edf4ff;
+        --bg-soft: #f8fafc;
         --surface: #ffffff;
-        --surface-soft: #f7fbff;
-        --ink: #0f2338;
-        --muted: #4f6478;
-        --line: #c8d9ee;
-        --brand: #0b74e5;
-        --brand-strong: #0755b3;
-        --accent: #00a7a0;
+        --surface-soft: #f6f9fc;
+        --ink: #141d2d;
+        --muted: #5c6b80;
+        --line: #dfe6ee;
+        --brand: #141d2d;
+        --brand-strong: #101827;
+        --accent: #66c6ac;
+        --accent-soft: rgba(102, 198, 172, 0.14);
         --ok: #188038;
         --warn: #e37400;
         --danger: #d93025;
     }
 
     .stApp {
-        background:
-            radial-gradient(1200px 500px at 6% -10%, #dcebff 0%, rgba(220, 235, 255, 0) 60%),
-            radial-gradient(900px 420px at 95% 0%, #dff8f5 0%, rgba(223, 248, 245, 0) 62%),
-            var(--bg-soft);
-        font-family: "Inter", "Roboto", "Segoe UI", Arial, sans-serif;
+        background: var(--bg-soft);
+        font-family: "DM Sans", "Segoe UI", Arial, sans-serif;
     }
 
     .block-container {
-        max-width: 1220px;
+        max-width: 1260px;
         margin: 0 auto;
-        padding-top: 1.4rem;
+        padding-top: 0.35rem;
+        padding-left: 1.15rem;
+        padding-right: 1.15rem;
         padding-bottom: 2rem;
     }
 
+    .lovable-topbar {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        padding: 6px 0;
+        margin-bottom: 8px;
+        min-height: 40px;
+    }
+
+    .lovable-brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .lovable-badge-w {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: linear-gradient(140deg, #85dcc5, #69c9bb);
+        color: #103a34;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-family: "Space Grotesk", sans-serif;
+        font-weight: 700;
+        box-shadow: 0 8px 18px rgba(89, 198, 177, 0.28);
+    }
+
+    .lovable-title {
+        font-family: "Space Grotesk", sans-serif;
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--ink);
+        letter-spacing: 0.03em;
+    }
+
+    .lovable-beta {
+        display: inline-flex;
+        margin-left: 8px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: #d8f3ea;
+        color: #3f9d8d;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+    }
+
+    .lovable-docs-link {
+        height: 48px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--muted);
+        font-size: 14px;
+        font-weight: 500;
+    }
+
+    [data-testid="stPopover"] > button {
+        height: 48px;
+        border-radius: 12px !important;
+        background: var(--surface) !important;
+        border: 1px solid #d8dee8 !important;
+        color: #1f2937 !important;
+        font-weight: 600 !important;
+        box-shadow: 0 1px 1px rgba(16, 24, 40, 0.06);
+    }
+
     .top-shell {
-        background: #ffffff;
+        background: var(--surface);
         border: 1px solid #dbe5f0;
         border-radius: 14px;
         box-shadow: 0 4px 14px rgba(20, 36, 52, 0.06);
@@ -146,88 +219,307 @@ st.markdown("""
     .output-box-success { background-color: #e6f4ea; color: #137333; padding: 15px; border-radius: 8px; border: 1px solid #ceead6; }
 
     .hero {
-        background:
-            radial-gradient(700px 260px at 10% 0%, rgba(120, 212, 255, 0.20), transparent 60%),
-            radial-gradient(700px 260px at 90% 0%, rgba(123, 154, 255, 0.16), transparent 60%),
-            linear-gradient(180deg, #f8fbff 0%, #f2f7ff 100%);
-        border: 1px solid #d8e6fb;
-        border-radius: 18px;
-        padding: 34px 30px 26px 30px;
-        box-shadow: 0 8px 22px rgba(37, 58, 89, 0.08);
-        margin: 10px 0 14px 0;
+        position: relative;
+        background: var(--brand);
+        border: 0;
+        border-radius: 0;
+        width: 100vw;
+        margin-left: calc(50% - 50vw);
+        margin-right: calc(50% - 50vw);
+        padding: 64px 0 56px 0;
+        box-shadow: none;
+        margin-top: 4px;
+        margin-bottom: 18px;
         text-align: center;
+        overflow: hidden;
+    }
+
+    .hero::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image:
+            linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+        background-size: 60px 60px;
+        opacity: 0.55;
+        pointer-events: none;
+    }
+
+    .hero::after {
+        display: none;
+    }
+
+    .hero > * {
+        position: relative;
+        z-index: 1;
+    }
+
+    .hero-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(102, 198, 172, 0.24);
+        background: rgba(102, 198, 172, 0.12);
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 500;
+        padding: 6px 16px;
+        margin-bottom: 20px;
+        margin-left: auto;
+        margin-right: auto;
     }
 
     .hero-title {
-        font-size: 48px;
-        line-height: 1.05;
-        font-weight: 800;
-        color: #10243a;
-        margin-bottom: 10px;
+        font-size: 56px;
+        line-height: 1.08;
+        font-weight: 700;
+        font-family: "Space Grotesk", sans-serif;
+        color: #f7fbff;
+        margin-bottom: 14px;
+        letter-spacing: -0.02em;
+        padding-left: 24px;
+        padding-right: 24px;
+    }
+
+    .hero-title-accent {
+        position: relative;
+        display: inline-block;
+        margin-left: 10px;
+        color: var(--accent);
+    }
+
+    .hero-title-accent::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: -5px;
+        height: 9px;
+        border-bottom: 2px solid rgba(102, 198, 172, 0.55);
+        border-radius: 50% 50% 60% 40%;
     }
 
     .hero-sub {
-        font-size: 20px;
-        color: #1f3a58;
+        font-size: 12px;
+        color: rgba(235, 243, 252, 0.7);
         font-weight: 600;
-        margin-bottom: 12px;
+        margin-bottom: 0;
         text-transform: none;
+        padding-left: 24px;
+        padding-right: 24px;
     }
 
     .hero-desc {
-        max-width: 960px;
-        margin: 0 auto 18px auto;
-        font-size: 15px;
-        color: #42566f;
+        max-width: 640px;
+        margin: 0 auto 32px auto;
+        font-size: 16px;
+        color: rgba(241, 246, 255, 0.84);
+        font-weight: 500;
         line-height: 1.55;
+        padding-left: 24px;
+        padding-right: 24px;
     }
 
-    .chip-row {
+    .assistant-cta {
+        margin: 0 auto 14px auto;
+        width: 100%;
+        display: block;
+        gap: 16px;
+        border: 1px solid rgba(102, 198, 172, 0.42);
+        background: rgba(55, 72, 88, 0.92);
+        border-radius: 16px;
+        padding: 4px;
+        box-shadow:
+            0 0 0 1px rgba(102, 198, 172, 0.08),
+            0 10px 20px rgba(10, 18, 32, 0.32),
+            0 18px 26px rgba(67, 216, 186, 0.18);
+    }
+
+    .assistant-cta-link {
+        display: block;
+        width: 500px;
+        max-width: calc(100% - 48px);
+        margin: 0 auto;
+        text-decoration: none !important;
+        color: inherit !important;
+        cursor: pointer;
+        user-select: none;
+    }
+
+    .assistant-cta-link:hover .assistant-cta {
+        border-color: rgba(117, 226, 201, 0.76);
+        box-shadow:
+            0 0 0 1px rgba(117, 226, 201, 0.16),
+            0 14px 26px rgba(9, 16, 28, 0.42),
+            0 22px 34px rgba(77, 224, 196, 0.3);
+    }
+
+    .assistant-cta-inner {
+        position: relative;
+        width: 100%;
+        box-sizing: border-box;
         display: flex;
-        justify-content: center;
-        flex-wrap: wrap;
-        gap: 8px;
-        margin-bottom: 8px;
+        align-items: center;
+        gap: 16px;
+        border-radius: 12px;
+        padding: 18px 24px;
+        background: rgba(255, 255, 255, 0.03);
     }
 
-    .chip {
+    .assistant-cta-icon {
+        width: 56px;
+        height: 56px;
+        border-radius: 16px;
+        background: var(--accent);
+        color: #1a2432;
         display: inline-flex;
         align-items: center;
-        padding: 6px 10px;
+        justify-content: center;
+        font-size: 24px;
+        font-weight: 800;
+        position: relative;
+        box-shadow: 0 10px 22px rgba(102, 198, 172, 0.34);
+    }
+
+    .assistant-cta-sparkle {
+        position: absolute;
+        top: -8px;
+        right: -8px;
+        width: 20px;
+        height: 20px;
         border-radius: 999px;
+        background: var(--surface);
+        color: #0f2b48;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         font-size: 12px;
-        font-weight: 600;
-        border: 1px solid #cfe0f6;
-        color: #215b8f;
-        background: #f2f7ff;
+        font-weight: 800;
+        box-shadow: 0 0 0 0 rgba(168, 235, 217, 0.5);
+        animation: sparklePulse 1.8s ease-in-out infinite;
+    }
+
+    @keyframes sparklePulse {
+        0% {
+            transform: scale(0.94);
+            box-shadow: 0 0 0 0 rgba(168, 235, 217, 0.5);
+        }
+        50% {
+            transform: scale(1.12);
+            box-shadow: 0 0 0 10px rgba(168, 235, 217, 0.0);
+        }
+        100% {
+            transform: scale(0.94);
+            box-shadow: 0 0 0 0 rgba(168, 235, 217, 0.0);
+        }
+    }
+
+    .assistant-cta-body {
+        flex: 1;
+        text-align: left;
+    }
+
+    .assistant-cta-title {
+        color: #eef6ff;
+        font-size: 19px;
+        font-weight: 700;
+        margin-bottom: 2px;
+        font-family: "Space Grotesk", sans-serif;
+        line-height: 1.2;
+    }
+
+    .assistant-cta-copy {
+        color: rgba(229, 238, 251, 0.54);
+        font-size: 14px;
+        font-weight: 500;
+    }
+
+    .assistant-cta-arrow {
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        border: 0;
+        color: var(--accent);
+        background: rgba(102, 198, 172, 0.2);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
     }
 
     .feature-grid {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 12px;
-        margin: 0 0 12px 0;
+        margin: 40px 0 0 0;
+        max-width: 1140px;
+        margin-left: auto;
+        margin-right: auto;
+        padding-left: 24px;
+        padding-right: 24px;
     }
 
     .feature-card {
-        background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
-        border: 1px solid #cddff6;
-        border-radius: 14px;
-        padding: 14px;
-        box-shadow: 0 6px 16px rgba(30, 59, 96, 0.06);
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(241, 246, 255, 0.07);
+        border-radius: 16px;
+        padding: 20px;
+        min-height: 178px;
+        box-shadow: none;
+        backdrop-filter: blur(4px);
+    }
+
+    .feature-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        background: rgba(102, 198, 172, 0.16);
+        color: var(--accent);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 12px;
     }
 
     .feature-title {
-        font-size: 15px;
-        font-weight: 700;
-        color: #173452;
-        margin-bottom: 4px;
+        font-size: 14px;
+        font-weight: 600;
+        color: #f1f7ff;
+        margin-bottom: 6px;
+        font-family: "Space Grotesk", sans-serif;
+        line-height: 1.35;
     }
 
     .feature-copy {
-        font-size: 13px;
-        color: #4e647d;
-        line-height: 1.45;
+        font-size: 12px;
+        color: rgba(229, 238, 251, 0.45);
+        line-height: 1.6;
+    }
+
+    div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+        justify-content: center;
+        gap: 2px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 4px 6px;
+        width: fit-content;
+        margin: 20px auto 16px auto;
+    }
+
+    div[data-testid="stTabs"] [data-baseweb="tab"] {
+        border-radius: 12px;
+        padding: 8px 18px;
+        font-weight: 600;
+        font-size: 14px;
+        color: var(--muted);
+    }
+
+    div[data-testid="stTabs"] [aria-selected="true"] {
+        background: var(--brand) !important;
+        color: #ffffff !important;
     }
 
     .step-label {
@@ -245,12 +537,12 @@ st.markdown("""
     }
 
     .form-card {
-        background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
-        border: 1px solid #c9dcef;
-        border-radius: 12px;
-        padding: 14px;
-        margin-bottom: 14px;
-        box-shadow: 0 8px 20px rgba(15, 35, 56, 0.06);
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 20px;
+        margin-bottom: 16px;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
     }
 
     .sticky-panel {
@@ -289,40 +581,188 @@ st.markdown("""
     .param-chip.content { background: #f0f3f6; border-color: #dfe6ee; color: #465465; }
 
     .tilda-panel {
-        background:
-            linear-gradient(180deg, #ffffff 0%, var(--surface-soft) 100%);
-        border: 1px solid #c9dcef;
-        border-radius: 14px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
         padding: 20px;
         margin-top: 8px;
-        box-shadow: 0 10px 24px rgba(18, 43, 70, 0.06);
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
     }
 
     .tilda-title {
-        font-size: 38px;
+        font-size: 34px;
         font-weight: 700;
-        color: #10263f;
-        margin-bottom: 2px;
-        letter-spacing: .2px;
+        color: var(--ink);
+        margin-bottom: 4px;
+        letter-spacing: 0;
+        font-family: "Space Grotesk", sans-serif;
     }
 
     .tilda-sub {
         font-size: 14px;
-        color: #3f5b75;
-        margin-bottom: 14px;
+        color: var(--muted);
+        margin-bottom: 16px;
     }
 
     .tilda-section {
-        font-size: 22px;
+        font-size: 20px;
         font-weight: 600;
-        color: #173756;
+        color: var(--ink);
         margin: 14px 0 8px 0;
+        font-family: "Space Grotesk", sans-serif;
     }
 
     .tilda-note {
         font-size: 13px;
         color: #4a627a;
         margin: 4px 0 10px 0;
+    }
+
+    .builder-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 22px;
+    }
+
+    .builder-head-title {
+        font-family: "Space Grotesk", sans-serif;
+        font-size: 30px;
+        font-weight: 700;
+        color: var(--ink);
+        line-height: 1.2;
+        margin: 0;
+        letter-spacing: -0.01em;
+    }
+
+    .builder-head-sub {
+        font-size: 14px;
+        color: var(--muted);
+        margin-top: 2px;
+    }
+
+    .builder-head-right {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 2px;
+    }
+
+    .builder-required-pill {
+        border-radius: 999px;
+        padding: 6px 12px;
+        background: rgba(102, 198, 172, 0.14);
+        color: #5bbda6;
+        font-size: 12px;
+        font-weight: 600;
+        border: 1px solid rgba(102, 198, 172, 0.2);
+    }
+
+    .builder-reset {
+        color: var(--muted);
+        font-size: 14px;
+        font-weight: 500;
+    }
+
+    .builder-card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 20px;
+        margin: 0 0 20px 0;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    }
+
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.builder-box-marker) {
+        background: var(--surface) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 16px !important;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06) !important;
+        padding: 18px 18px 14px 18px !important;
+        margin: 0 0 20px 0 !important;
+    }
+
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.builder-box-marker) > div {
+        background: transparent !important;
+    }
+
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.builder-box-marker) div[data-testid="stTextInput"] input,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.builder-box-marker) div[data-baseweb="select"] > div,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.builder-box-marker) div[data-testid="stDateInput"] input {
+        background: #f5f8fb !important;
+        border-color: #d1d9e4 !important;
+        color: var(--ink) !important;
+        border-radius: 12px !important;
+    }
+
+    .builder-card-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        font-family: "Space Grotesk", sans-serif;
+        color: var(--ink);
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 12px;
+    }
+
+    .builder-box-marker {
+        display: none;
+    }
+
+    .builder-icon-dot {
+        width: 26px;
+        height: 26px;
+        border-radius: 9px;
+        background: #eef7f3;
+        color: #6abda8;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 13px;
+        font-weight: 600;
+    }
+
+    .builder-step-dot {
+        width: 20px;
+        height: 20px;
+        border-radius: 999px;
+        background: var(--brand);
+        color: #ffffff;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        font-weight: 700;
+    }
+
+    .builder-subhead {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #4b5563;
+        margin: 10px 0 12px 0;
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        font-family: "DM Sans", sans-serif;
+    }
+
+    .builder-subhead::after {
+        content: "";
+        flex: 1;
+        height: 1px;
+        background: #dbe3ed;
+    }
+
+    .builder-naming-link {
+        text-align: right;
+        font-size: 13px;
+        color: #6abda8;
+        font-weight: 600;
+        margin-top: 2px;
     }
     
     /* 4. STILE UTM CHECKER (Riproduzione Screenshot) */
@@ -515,13 +955,13 @@ st.markdown("""
         display: flex !important;
         justify-content: center !important;
         align-items: center !important;
-        gap: 10px;
-        background: linear-gradient(180deg, #eef5ff 0%, #e8f1fe 100%) !important;
-        border: 1px solid #c8d9ee !important;
-        border-radius: 999px;
-        padding: 6px 8px;
+        gap: 2px;
+        background: var(--surface) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 16px;
+        padding: 4px 6px;
         width: fit-content;
-        margin: 8px auto 12px auto;
+        margin: 20px auto 16px auto;
     }
 
     div[data-testid="stTabs"] > div,
@@ -544,41 +984,43 @@ st.markdown("""
 
     div[data-testid="stTabs"] [data-baseweb="tab"],
     div[data-testid="stTabs"] [role="tab"] {
-        border-radius: 999px;
-        padding: 9px 18px;
-        font-weight: 700;
-        color: #27425d;
+        border-radius: 12px;
+        padding: 8px 18px;
+        font-weight: 600;
+        color: var(--muted);
         border: 1px solid transparent;
         background: transparent;
         transition: all .2s ease;
     }
 
     div[data-testid="stTabs"] [aria-selected="true"] {
-        background: linear-gradient(120deg, var(--brand), var(--brand-strong));
+        background: var(--brand) !important;
         color: #fff !important;
-        border-color: #0b63c7;
-        box-shadow: 0 6px 14px rgba(11, 116, 229, 0.3);
+        border-color: transparent;
+        box-shadow: none;
     }
 
     div[data-testid="stTabs"] [data-baseweb="tab"]:hover,
     div[data-testid="stTabs"] [role="tab"]:hover {
-        background: #f6faff;
-        border-color: #c8d9ee;
+        background: #f4f7fa;
+        border-color: var(--line);
     }
 
     .stButton > button {
-        border-radius: 10px;
-        border: 1px solid #bcd2ea;
-        background: #f6fbff;
-        color: #1d3955;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
         font-weight: 600;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
     }
 
     .stButton > button[kind="primary"] {
-        background: linear-gradient(120deg, var(--brand), var(--brand-strong));
-        border: none;
+        background: var(--brand);
+        border: 1px solid var(--brand);
         color: #fff;
-        font-weight: 700;
+        font-weight: 600;
+        box-shadow: 0 2px 6px rgba(17, 24, 39, 0.22);
     }
 
     /* Allinea altezza e migliora leggibilità dei campi */
@@ -586,11 +1028,11 @@ st.markdown("""
     div[data-baseweb="select"] > div,
     div[data-testid="stDateInput"] input {
         min-height: 42px !important;
-        border-radius: 10px !important;
-        border: 1px solid #b9d2ea !important;
-        background: #ffffff !important;
-        color: #12283f !important;
-        box-shadow: inset 0 1px 0 rgba(255,255,255,.6) !important;
+        border-radius: 12px !important;
+        border: 1px solid var(--line) !important;
+        background: var(--surface) !important;
+        color: var(--ink) !important;
+        box-shadow: none !important;
     }
 
     div[data-testid="stTextInput"] input::placeholder {
@@ -598,22 +1040,47 @@ st.markdown("""
     }
 
     div[data-baseweb="select"] > div {
-        background: #ffffff !important;
+        background: var(--surface) !important;
     }
 
     div[data-testid="stTextInput"] input:focus,
     div[data-baseweb="select"] > div:focus-within,
     div[data-testid="stDateInput"] input:focus {
-        border-color: var(--brand) !important;
-        box-shadow: 0 0 0 3px rgba(11, 116, 229, 0.16) !important;
+        border-color: rgba(102, 198, 172, 0.62) !important;
+        box-shadow: 0 0 0 3px rgba(102, 198, 172, 0.18) !important;
     }
 
     /* Campi disabilitati (es. label utm_*) volutamente differenziati */
     div[data-testid="stTextInput"] input:disabled {
-        background: linear-gradient(180deg, #dce9f9 0%, #cfdef2 100%) !important;
-        border: 1px solid #a9c2de !important;
-        color: #2f4d69 !important;
+        background: #f5f8fb !important;
+        border: 1px solid var(--line) !important;
+        color: #50627a !important;
         font-weight: 600 !important;
+    }
+
+    div[data-testid="stTextInput"] input[value^="utm_"]:disabled,
+    div[data-testid="stTextInput"] input[value="campaign_type"]:disabled {
+        background: var(--brand) !important;
+        border: 1px solid var(--brand) !important;
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        opacity: 1 !important;
+        border-radius: 999px !important;
+        min-height: 34px !important;
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        text-align: center;
+    }
+
+    div[data-testid="stRadio"] [role="radiogroup"] {
+        gap: 8px;
+    }
+
+    div[data-testid="stRadio"] [role="radiogroup"] label {
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        padding: 2px 10px;
     }
 
     div[data-testid="stTextInput"] label,
@@ -638,17 +1105,39 @@ st.markdown("""
         }
 
         .hero-title {
-            font-size: 34px;
+            font-size: 42px;
         }
 
-        .hero-sub {
+        .assistant-cta-title {
             font-size: 18px;
+        }
+
+        .assistant-cta-copy {
+            font-size: 13px;
         }
     }
 
     @media (max-width: 640px) {
+        .block-container {
+            padding-left: 0.6rem;
+            padding-right: 0.6rem;
+        }
         .feature-grid {
             grid-template-columns: 1fr;
+            padding-left: 14px;
+            padding-right: 14px;
+        }
+        .hero {
+            padding: 42px 0 28px 0;
+        }
+        .hero-title {
+            font-size: 34px;
+        }
+        .hero-desc {
+            font-size: 14px;
+        }
+        .assistant-cta-inner {
+            padding: 14px;
         }
     }
 
@@ -793,6 +1282,7 @@ def get_top_traffic_sources(property_id, creds):
             date_ranges=[DateRange(start_date="30daysAgo", end_date="today")],
             dimensions=[Dimension(name="sessionSource")],
             metrics=[Metric(name="sessions")],
+            order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
             limit=50
         )
         response = client.run_report(request)
@@ -814,6 +1304,7 @@ def get_top_traffic_mediums(property_id, creds):
             date_ranges=[DateRange(start_date="30daysAgo", end_date="today")],
             dimensions=[Dimension(name="sessionMedium")],
             metrics=[Metric(name="sessions")],
+            order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
             limit=50
         )
         response = client.run_report(request)
@@ -834,6 +1325,7 @@ def get_source_medium_pairs(property_id, creds):
             date_ranges=[DateRange(start_date="30daysAgo", end_date="today")],
             dimensions=[Dimension(name="sessionSource"), Dimension(name="sessionMedium")],
             metrics=[Metric(name="sessions")],
+            order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
             limit=200
         )
         response = client.run_report(request)
@@ -955,21 +1447,49 @@ def filter_options_by_source_mode(options, mode, field):
 
     if field == "source":
         source_map = {
+            "Paid": ["google", "bing", "adwords", "googleads", "facebook", "instagram", "tiktok", "linkedin", "meta"],
+            "Email": ["email", "newsletter", "crm", "mailchimp", "sfmc"],
+            "SMS": ["sms", "whatsapp", "messenger"],
             "Google Ads": ["google", "adwords", "googleads", "bing"],
             "Social": ["facebook", "instagram", "tiktok", "linkedin", "pinterest", "social", "meta", "twitter", "x"],
-            "Email": ["email", "newsletter", "crm", "mailchimp", "sfmc"],
         }
         hints = source_map.get(mode, [])
     else:
         medium_map = {
+            "Paid": ["cpc", "ppc", "sem", "paid_search", "paid-search", "cpm", "cpv", "social_paid", "paid_social", "paid-social"],
+            "Email": ["email", "mailing_campaign", "newsletter", "mail"],
+            "SMS": ["sms"],
             "Google Ads": ["cpc", "ppc", "paid-search", "paid_search", "sem"],
             "Social": ["social", "social_paid", "social_org", "paid-social", "organic-social", "organic_social", "paid_social"],
-            "Email": ["email", "mailing_campaign", "newsletter", "mail"],
         }
         hints = medium_map.get(mode, [])
 
     filtered = [t for t in tokens if any(h in t for h in hints)]
     return sorted(set(filtered))
+
+
+def order_by_ga4_priority(options, ga4_priority, normalizer):
+    """Order options by GA4 popularity (sessions) first, then alphabetical fallback."""
+    values = []
+    seen = set()
+    for raw in options or []:
+        v = normalizer(raw)
+        if v and v not in seen:
+            values.append(v)
+            seen.add(v)
+
+    priority = []
+    seen_p = set()
+    for raw in ga4_priority or []:
+        v = normalizer(raw)
+        if v and v not in seen_p:
+            priority.append(v)
+            seen_p.add(v)
+
+    head = [v for v in priority if v in seen]
+    tail = sorted([v for v in values if v not in set(head)])
+    return head + tail
+
 
 def is_valid_url(url):
     regex = re.compile(r'^https?://(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|localhost|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\d+)?(?:/?|[/?]\S+)$', re.IGNORECASE)
@@ -992,6 +1512,42 @@ def load_client_config(client_id: str):
         return payload if isinstance(payload, dict) else None
     except Exception:
         return None
+
+
+def save_client_config(client_id: str, payload: dict) -> Path:
+    cid = normalize_client_id(client_id)
+    if not cid:
+        raise ValueError("client_id non valido")
+    CLIENT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    path = _client_config_path(cid)
+    body = dict(payload or {})
+    body["client_id"] = cid
+    path.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def parse_rules_rows_from_uploaded_file(file_name: str, file_bytes: bytes) -> list:
+    ext = Path(file_name or "").suffix.lower()
+    rows = []
+
+    if ext == ".csv":
+        df = pd.read_csv(BytesIO(file_bytes), dtype=str).fillna("")
+        for _, row in df.iterrows():
+            row_dict = {str(k): str(v) for k, v in row.to_dict().items()}
+            row_dict["__sheet_name"] = "csv"
+            rows.append(row_dict)
+        return rows
+
+    sheets = pd.read_excel(BytesIO(file_bytes), sheet_name=None, dtype=str)
+    for sheet_name, df in (sheets or {}).items():
+        if df is None:
+            continue
+        safe_sheet_name = str(sheet_name or "").strip()[:80] or "__sheet__"
+        for _, row in df.fillna("").iterrows():
+            row_dict = {str(k): str(v) for k, v in row.to_dict().items()}
+            row_dict["__sheet_name"] = safe_sheet_name
+            rows.append(row_dict)
+    return rows
 
 
 def list_saved_client_ids() -> list:
@@ -1402,6 +1958,8 @@ def show_dashboard():
     if "user_email" not in st.session_state:
         st.session_state.user_email = get_user_email(st.session_state.credentials)
     current_user_email = st.session_state.get("user_email", "")
+    user_email_lower = str(current_user_email or "").strip().lower()
+    is_webranking_user = user_email_lower.endswith("@webranking.it") or user_email_lower.endswith("@webranking.com")
     cached_for_email = st.session_state.get("ga4_cache_user_email", "")
     if current_user_email and cached_for_email != current_user_email:
         st.session_state.pop("ga4_accounts", None)
@@ -1419,16 +1977,25 @@ def show_dashboard():
     if "show_user_menu" not in st.session_state:
         st.session_state.show_user_menu = False
 
-    _, c_head_2 = st.columns([4.0, 1.2])
-    with c_head_2:
-        user_email = st.session_state.get("user_email", "")
-        user_initial = user_email[:1].upper() if user_email else "U"
+    header_left, header_docs, header_account = st.columns([0.74, 0.12, 0.14], gap="small")
+    with header_left:
         st.markdown(
-            f'<div class="user-pill"><span class="user-avatar">{user_initial}</span>{html_lib.escape(user_email)}</div>',
-            unsafe_allow_html=True
+            """
+            <div class="lovable-topbar">
+                <div class="lovable-brand">
+                    <span class="lovable-badge-w">W</span>
+                    <div class="lovable-title">SMART UTM <span class="lovable-beta">BETA</span></div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
+    with header_docs:
+        st.markdown('<div class="lovable-docs-link">Docs</div>', unsafe_allow_html=True)
+    with header_account:
         if hasattr(st, "popover"):
-            with st.popover("Account ▾", use_container_width=True):
+            with st.popover("Account", use_container_width=True):
+                st.caption(st.session_state.get("user_email", ""))
                 if st.button("Impostazioni", key="settings_btn_menu", use_container_width=True):
                     st.session_state.show_settings = True
                 if st.button("Logout", key="logout_btn", use_container_width=True):
@@ -1527,42 +2094,128 @@ def show_dashboard():
 
     st.markdown("""
     <div class="hero">
-        <div class="hero-title">Smart UTM Assistant</div>
-        <div class="hero-sub">Il collegamento live a GA4 e il chatbot ti guideranno nella creazione</div>
-        <div class="hero-desc">Questo tool ti permette di creare e validare link UTM con una guida passo-passo del chatbot, mentre legge in tempo reale la property GA4 selezionata per mostrarti sorgenti e convenzioni realmente usate nelle campagne.</div>
-        <div class="chip-row">
-            <span class="chip">Guida chatbot step-by-step</span>
-            <span class="chip">Connessione diretta GA4</span>
-            <span class="chip">Dati reali di campagna</span>
+        <div class="hero-status">● Connesso a GA4 in tempo reale</div>
+        <div class="hero-title">Smart UTM <span class="hero-title-accent">Assistant</span></div>
+        <div class="hero-desc">Crea e valida link UTM con guida passo-passo, leggendo in tempo reale source e medium dalla tua property GA4.</div>
+        <div id="hero-open-chat-cta" class="assistant-cta-link" role="button" tabindex="0" aria-label="Apri chatbot WR Assistant">
+            <div class="assistant-cta">
+                <div class="assistant-cta-inner">
+                    <div class="assistant-cta-icon">💬<span class="assistant-cta-sparkle">✦</span></div>
+                    <div class="assistant-cta-body">
+                        <div class="assistant-cta-title">Crea UTM con l'Assistente AI</div>
+                        <div class="assistant-cta-copy">Apri il chatbot e lasciati guidare passo dopo passo</div>
+                    </div>
+                    <div class="assistant-cta-arrow">→</div>
+                </div>
+            </div>
         </div>
-    </div>
-    <div class="feature-grid">
-        <div class="feature-card">
-            <div class="feature-title">Guida Assistita</div>
-            <div class="feature-copy">Il chatbot ti accompagna passo-passo nella compilazione corretta dei parametri.</div>
-        </div>
-        <div class="feature-card">
-            <div class="feature-title">Live Data GA4</div>
-            <div class="feature-copy">Source e medium vengono letti in tempo reale dalla property GA4 selezionata.</div>
-        </div>
-        <div class="feature-card">
-            <div class="feature-title">Standard Operativo</div>
-            <div class="feature-copy">Generi URL UTM uniformi e coerenti con le convenzioni reali di campagna.</div>
-        </div>
-        <div class="feature-card">
-            <div class="feature-title">Vantaggio Reale</div>
-            <div class="feature-copy">Diverso dai builder classici: qui hai GA4 collegato + assistente guidato nello stesso flusso.</div>
+        <div class="hero-sub">Oppure compila manualmente i campi qui sotto ↓</div>
+        <div class="feature-grid">
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <ellipse cx="12" cy="5" rx="7" ry="3"></ellipse>
+                        <path d="M5 5v14c0 1.7 3.1 3 7 3s7-1.3 7-3V5"></path>
+                        <path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"></path>
+                    </svg>
+                </div>
+                <div class="feature-title">Dati reali da GA4</div>
+                <div class="feature-copy">Source e medium precaricati dalla tua property: niente più errori di digitazione.</div>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="4" y="8" width="16" height="11" rx="2"></rect>
+                        <path d="M9 4h6"></path>
+                        <path d="M12 4v4"></path>
+                        <circle cx="9" cy="13" r="1"></circle>
+                        <circle cx="15" cy="13" r="1"></circle>
+                    </svg>
+                </div>
+                <div class="feature-title">Assistente AI dedicato</div>
+                <div class="feature-copy">Un chatbot che ti guida nella scelta dei parametri, suggerendo best practice.</div>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M16 3h5v5"></path>
+                        <path d="M4 20l8-8"></path>
+                        <path d="M21 3l-9 9"></path>
+                        <path d="M4 4h5v5"></path>
+                        <path d="M16 16l5 5"></path>
+                    </svg>
+                </div>
+                <div class="feature-title">Naming convention unificata</div>
+                <div class="feature-copy">Parametri coerenti tra team e campagne, addio a UTM duplicati o incoerenti.</div>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 3l7 3v6c0 5-3.5 8.8-7 10-3.5-1.2-7-5-7-10V6l7-3z"></path>
+                        <path d="M9 12l2 2 4-4"></path>
+                    </svg>
+                </div>
+                <div class="feature-title">Validazione automatica</div>
+                <div class="feature-copy">Controllo in tempo reale di errori, duplicati e formattazione prima di generare l'URL.</div>
+            </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # --- CONTESTO CLIENTE ATTIVO DA LINK FIRMATO ---
+    components.html(
+        """
+        <script>
+            (function () {
+                const doc = window.parent && window.parent.document ? window.parent.document : document;
+                const cta = doc.getElementById("hero-open-chat-cta");
+                if (!cta || cta.dataset.chatBound === "1") return;
+
+                const openChat = () => {
+                    let wrBtn = null;
+                    try {
+                        wrBtn = doc.querySelector('div[data-testid="stColumn"]:has(div.fab-unique-marker) button');
+                    } catch (e) {}
+                    if (!wrBtn) {
+                        const cols = Array.from(doc.querySelectorAll('div[data-testid="stColumn"]'));
+                        for (const col of cols) {
+                            if (col.querySelector('.fab-unique-marker')) {
+                                wrBtn = col.querySelector('button');
+                                if (wrBtn) break;
+                            }
+                        }
+                    }
+                    if (wrBtn) {
+                        wrBtn.click();
+                    }
+                };
+
+                cta.addEventListener("click", function (ev) {
+                    ev.preventDefault();
+                    openChat();
+                });
+                cta.addEventListener("keydown", function (ev) {
+                    if (ev.key === "Enter" || ev.key === " ") {
+                        ev.preventDefault();
+                        openChat();
+                    }
+                });
+                cta.dataset.chatBound = "1";
+            })();
+        </script>
+        """,
+        height=0,
+    )
+
+    # --- CONTESTO CLIENTE ATTIVO (LINK FIRMATO O SCELTA INTERNA WR) ---
     locked_client_id = st.session_state.get("client_id_lock", "")
+    selected_builder_client_id = normalize_client_id(st.session_state.get("builder_selected_client_id", ""))
     active_client_id = ""
     active_client_config = None
     lock_resolution_note = ""
     if locked_client_id:
         active_client_id, active_client_config, lock_resolution_note = resolve_locked_client_context(locked_client_id)
+    elif is_webranking_user and selected_builder_client_id:
+        active_client_id, active_client_config, lock_resolution_note = resolve_locked_client_context(selected_builder_client_id)
     st.session_state["active_client_id"] = active_client_id or ""
     st.session_state["active_client_config"] = active_client_config
     st.session_state["active_client_rules_text"] = build_client_rules_text_for_chatbot(active_client_config)
@@ -1579,7 +2232,9 @@ def show_dashboard():
     if st.session_state.get("client_lock_error"):
         st.warning(st.session_state.get("client_lock_error"))
     # --- TABS DI NAVIGAZIONE ---
-    tab_builder, tab_checker, tab_history = st.tabs(["Build URL", "Check URL", "UTM History & Tracking"])
+    tab_builder, tab_checker, tab_client_config, tab_history = st.tabs(
+        ["Build URL", "Check URL", "Client Configuration", "UTM History & Tracking"]
+    )
 
     # --- SESSION STATE PER CHAT ---
     if "messages" not in st.session_state:
@@ -1589,379 +2244,472 @@ def show_dashboard():
     # TAB 1: UTM GENERATOR (BUILDER)
     # ==============================================================================
     with tab_builder:
-        st.markdown('<div class="tilda-title">Campaign URL Builder</div>', unsafe_allow_html=True)
-        st.markdown('<div class="tilda-sub">Seleziona la property GA4 di riferimento per caricare source e medium reali.</div>', unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div class="builder-head">
+                <div>
+                    <div class="builder-head-title">Campaign URL Builder</div>
+                    <div class="builder-head-sub">Seleziona la property GA4 per caricare source e medium reali.</div>
+                </div>
+                <div class="builder-head-right">
+                    <span class="builder-required-pill">0/3 required</span>
+                    <span class="builder-reset">↻ Reset</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         selected_prop_name = None
         sel_prop_id = None
         is_locked_client_view = bool(st.session_state.get("client_id_lock"))
+
+        if is_webranking_user and not is_locked_client_view:
+            saved_ids = list_saved_client_ids()
+            builder_cfg_options = ["Nessuna configurazione"] + saved_ids
+            current_builder_cfg = normalize_client_id(st.session_state.get("builder_selected_client_id", ""))
+            default_cfg_idx = builder_cfg_options.index(current_builder_cfg) if current_builder_cfg in builder_cfg_options else 0
+            picked_builder_cfg = st.selectbox(
+                "Configurazione cliente (solo interno WR)",
+                builder_cfg_options,
+                index=default_cfg_idx,
+                key="builder_client_config_select",
+                help="Selezionando un cliente vengono preimpostate account/property e regole dal file configurazione.",
+            )
+            picked_norm = normalize_client_id(picked_builder_cfg) if picked_builder_cfg != "Nessuna configurazione" else ""
+            if picked_norm != current_builder_cfg:
+                st.session_state["builder_selected_client_id"] = picked_norm
+                st.rerun()
+
         active_client_config = st.session_state.get("active_client_config") or {}
         client_rule_sources, client_rule_mediums, _client_rule_campaign_types = extract_client_rule_values(active_client_config)
         prop_channels = ["Paid Search", "Paid Social", "Display", "Email", "Organic Social", "Affiliate", "Video", "Altro"]
-        prop_config = {"default_country": "it", "expected_domain": ""}
+        raw_prop_cfg = active_client_config.get("property_config") if isinstance(active_client_config.get("property_config"), dict) else {}
+        prop_config = {
+            "default_country": str(raw_prop_cfg.get("default_country", "it") or "it"),
+            "expected_domain": str(raw_prop_cfg.get("expected_domain", "")).strip().lower(),
+        }
         real_sources = []
         real_mediums = []
         source_medium_map = {}
 
-        ga_col1, ga_col2 = st.columns([1.2, 1], gap="small")
-        if "ga4_accounts" not in st.session_state:
-            with st.spinner("Caricamento Account GA4..."):
-                st.session_state.ga4_accounts = get_ga4_accounts_structure(st.session_state.credentials)
-        accounts_structure = st.session_state.ga4_accounts
-        if accounts_structure:
-            account_names = [a["display_name"] for a in accounts_structure]
-            preferred_ga4_client_name = str(active_client_config.get("ga4_client_name", "")).strip()
-            selected_account = None
-            selected_account_name = ""
-            if preferred_ga4_client_name:
-                selected_account = next(
-                    (
-                        a for a in accounts_structure
-                        if str(a.get("display_name", "")).strip().lower() == preferred_ga4_client_name.lower()
-                    ),
-                    None
-                )
-                if not selected_account:
+        # Applica defaults quando cambia profilo cliente attivo nel Builder.
+        builder_profile_token = normalize_client_id(active_client_config.get("client_id", "")) if active_client_config else ""
+        if st.session_state.get("builder_profile_token") != builder_profile_token:
+            if builder_profile_token:
+                expected_domain = str(prop_config.get("expected_domain", "")).strip()
+                if expected_domain:
+                    st.session_state["builder_url_domain"] = expected_domain
+                default_country = normalize_token(prop_config.get("default_country", "")) or "it"
+                st.session_state["campaign_country_language"] = default_country
+                if client_rule_sources:
+                    st.session_state["req_src_val_select"] = client_rule_sources[0]
+                if client_rule_mediums:
+                    st.session_state["req_med_val_select"] = client_rule_mediums[0]
+            st.session_state["builder_profile_token"] = builder_profile_token
+
+        with st.container(border=True):
+            st.markdown('<div class="builder-box-marker"></div>', unsafe_allow_html=True)
+            st.markdown('<div class="builder-card-title"><span class="builder-icon-dot">⋮</span>Collegamento GA4</div>', unsafe_allow_html=True)
+            ga_col1, ga_col2 = st.columns([1.2, 1], gap="small")
+            if "ga4_accounts" not in st.session_state:
+                with st.spinner("Caricamento Account GA4..."):
+                    st.session_state.ga4_accounts = get_ga4_accounts_structure(st.session_state.credentials)
+            accounts_structure = st.session_state.ga4_accounts
+            if accounts_structure:
+                account_names = [a["display_name"] for a in accounts_structure]
+                preferred_ga4_client_name = str(active_client_config.get("ga4_client_name", "")).strip()
+                selected_account = None
+                selected_account_name = ""
+                default_account_idx = 0
+                if preferred_ga4_client_name:
                     selected_account = next(
                         (
                             a for a in accounts_structure
-                            if preferred_ga4_client_name.lower() in str(a.get("display_name", "")).strip().lower()
+                            if str(a.get("display_name", "")).strip().lower() == preferred_ga4_client_name.lower()
                         ),
                         None
                     )
-            with ga_col1:
-                if selected_account and is_locked_client_view:
-                    selected_account_name = str(selected_account.get("display_name", "")).strip()
-                    st.text_input(
-                        "GA4 Account",
-                        value=selected_account_name,
-                        disabled=True,
-                        key=f"builder_locked_account_{st.session_state.get('active_client_id', '') or 'none'}",
-                    )
+                    if not selected_account:
+                        selected_account = next(
+                            (
+                                a for a in accounts_structure
+                                if preferred_ga4_client_name.lower() in str(a.get("display_name", "")).strip().lower()
+                            ),
+                            None
+                        )
+                if selected_account:
+                    selected_name = str(selected_account.get("display_name", "")).strip()
+                    if selected_name in account_names:
+                        default_account_idx = account_names.index(selected_name)
+                account_widget_key = f"builder_ga4_account_{builder_profile_token or 'none'}"
+                property_widget_key = f"builder_ga4_property_{builder_profile_token or 'none'}"
+                with ga_col1:
+                    if selected_account and is_locked_client_view:
+                        selected_account_name = str(selected_account.get("display_name", "")).strip()
+                        st.text_input(
+                            "GA4 Account",
+                            value=selected_account_name,
+                            disabled=True,
+                            key=f"builder_locked_account_{st.session_state.get('active_client_id', '') or 'none'}",
+                        )
+                    else:
+                        selected_account_name = st.selectbox("GA4 Account", account_names, index=default_account_idx, key=account_widget_key)
+                        selected_account = next((a for a in accounts_structure if a["display_name"] == selected_account_name), None)
+                if selected_account and selected_account["properties"]:
+                    prop_map = {p["display_name"]: p["property_id"] for p in selected_account["properties"]}
+                    with ga_col2:
+                        prop_names = list(prop_map.keys())
+                        preferred_prop_id = str(active_client_config.get("ga4_property_id", "")).replace("properties/", "").strip()
+                        default_prop_idx = 0
+                        if preferred_prop_id:
+                            for idx, prop_name in enumerate(prop_names):
+                                pid_raw = str(prop_map.get(prop_name, "")).replace("properties/", "").strip()
+                                if pid_raw == preferred_prop_id:
+                                    default_prop_idx = idx
+                                    break
+                        selected_prop_name = st.selectbox("GA4 Property", prop_names, index=default_prop_idx, key=property_widget_key)
+                    if selected_prop_name:
+                        sel_prop_id = prop_map[selected_prop_name]
+                        current_prop_key = f"sources_{sel_prop_id}"
+                        if current_prop_key not in st.session_state:
+                            with st.spinner("Lettura sorgenti reali dalla property..."):
+                                st.session_state[current_prop_key] = get_top_traffic_sources(sel_prop_id, st.session_state.credentials)
+                        current_medium_key = f"mediums_{sel_prop_id}"
+                        if current_medium_key not in st.session_state:
+                            with st.spinner("Lettura medium reali dalla property..."):
+                                st.session_state[current_medium_key] = get_top_traffic_mediums(sel_prop_id, st.session_state.credentials)
+                        current_pairs_key = f"source_medium_pairs_{sel_prop_id}"
+                        if current_pairs_key not in st.session_state:
+                            with st.spinner("Lettura relazione source-medium dalla property..."):
+                                st.session_state[current_pairs_key] = get_source_medium_pairs(sel_prop_id, st.session_state.credentials)
+                        real_sources = st.session_state.get(current_prop_key, [])
+                        real_mediums = st.session_state.get(current_medium_key, [])
+                        pairs = st.session_state.get(current_pairs_key, [])
+                        source_medium_map = {}
+                        source_medium_seen = {}
+                        for src_raw, med_raw in pairs:
+                            src_n = normalize_token(src_raw)
+                            med_n = normalize_medium_token(med_raw)
+                            if src_n and med_n:
+                                if src_n not in source_medium_map:
+                                    source_medium_map[src_n] = []
+                                    source_medium_seen[src_n] = set()
+                                if med_n not in source_medium_seen[src_n]:
+                                    source_medium_map[src_n].append(med_n)
+                                    source_medium_seen[src_n].add(med_n)
+                        if real_sources:
+                            global SOURCE_OPTIONS
+                            SOURCE_OPTIONS = sorted(list(set(get_source_options() + real_sources)))
+                            preview = ", ".join(real_sources[:6])
+                            st.markdown(f'<div class="tilda-note">Sorgenti recenti da GA4: {html_lib.escape(preview)}</div>', unsafe_allow_html=True)
+                        if real_mediums:
+                            medium_preview = ", ".join(real_mediums[:6])
+                            st.markdown(f'<div class="tilda-note">Medium recenti da GA4: {html_lib.escape(medium_preview)}</div>', unsafe_allow_html=True)
                 else:
-                    selected_account_name = st.selectbox("GA4 Account", account_names)
-                    selected_account = next((a for a in accounts_structure if a["display_name"] == selected_account_name), None)
-            if selected_account and selected_account["properties"]:
-                prop_map = {p["display_name"]: p["property_id"] for p in selected_account["properties"]}
-                with ga_col2:
-                    selected_prop_name = st.selectbox("GA4 Property", list(prop_map.keys()))
-                if selected_prop_name:
-                    sel_prop_id = prop_map[selected_prop_name]
-                    current_prop_key = f"sources_{sel_prop_id}"
-                    if current_prop_key not in st.session_state:
-                        with st.spinner("Lettura sorgenti reali dalla property..."):
-                            st.session_state[current_prop_key] = get_top_traffic_sources(sel_prop_id, st.session_state.credentials)
-                    current_medium_key = f"mediums_{sel_prop_id}"
-                    if current_medium_key not in st.session_state:
-                        with st.spinner("Lettura medium reali dalla property..."):
-                            st.session_state[current_medium_key] = get_top_traffic_mediums(sel_prop_id, st.session_state.credentials)
-                    current_pairs_key = f"source_medium_pairs_{sel_prop_id}"
-                    if current_pairs_key not in st.session_state:
-                        with st.spinner("Lettura relazione source-medium dalla property..."):
-                            st.session_state[current_pairs_key] = get_source_medium_pairs(sel_prop_id, st.session_state.credentials)
-                    real_sources = st.session_state.get(current_prop_key, [])
-                    real_mediums = st.session_state.get(current_medium_key, [])
-                    pairs = st.session_state.get(current_pairs_key, [])
-                    source_medium_map = {}
-                    for src_raw, med_raw in pairs:
-                        src_n = normalize_token(src_raw)
-                        med_n = normalize_medium_token(med_raw)
-                        if src_n and med_n:
-                            source_medium_map.setdefault(src_n, set()).add(med_n)
-                    if real_sources:
-                        global SOURCE_OPTIONS
-                        SOURCE_OPTIONS = sorted(list(set(get_source_options() + real_sources)))
-                        preview = ", ".join(real_sources[:6])
-                        st.markdown(f'<div class="tilda-note">Sorgenti recenti da GA4: {html_lib.escape(preview)}</div>', unsafe_allow_html=True)
-                    if real_mediums:
-                        medium_preview = ", ".join(real_mediums[:6])
-                        st.markdown(f'<div class="tilda-note">Medium recenti da GA4: {html_lib.escape(medium_preview)}</div>', unsafe_allow_html=True)
+                    st.warning("Nessuna property disponibile nell'account selezionato.")
             else:
-                st.warning("Nessuna property disponibile nell'account selezionato.")
-        else:
-            st.warning("Nessun account GA4 trovato o accesso negato.")
+                st.warning("Nessun account GA4 trovato o accesso negato.")
 
         st.session_state["builder_selected_property_id"] = str(sel_prop_id or "")
         st.session_state["builder_selected_property_name"] = str(selected_prop_name or "")
 
-        st.markdown('<div class="tilda-section">Your URL address</div>', unsafe_allow_html=True)
-        url_col1, url_col2 = st.columns([0.16, 0.84], gap="small")
-        with url_col1:
-            url_scheme = st.selectbox(" ", ["https://", "http://"])
-        with url_col2:
-            url_domain = st.text_input(
-                "URL di destinazione",
-                placeholder="thismywebsite.com",
-                help="Dove atterrerà l’utente quando clicca sulla CTA?"
-            )
-        url_domain = url_domain.strip()
-        if url_domain.startswith("http://") or url_domain.startswith("https://"):
-            destination_url = url_domain
-        else:
-            destination_url = f"{url_scheme}{url_domain}" if url_domain else ""
-        domain_hint = prop_config.get("expected_domain", "")
-        if not url_domain:
-            st.markdown('<div class="msg-warning">⚠️ Inserisci un URL completo (es. https://example.com/pagina)</div>', unsafe_allow_html=True)
-        elif not is_valid_url(destination_url):
-            st.markdown('<div class="msg-error">❌ URL non valido. Usa formato corretto: https://dominio.tld/percorso</div>', unsafe_allow_html=True)
-        elif domain_hint and domain_hint not in destination_url:
-            st.markdown(f'<div class="msg-warning">⚠️ Dominio diverso da quello atteso: {html_lib.escape(domain_hint)}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="msg-success">✅ URL valido</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="tilda-section">Traffic source</div>', unsafe_allow_html=True)
-        with st.expander("Golden Rules Naming Convention", expanded=False):
-            st.markdown("""
-            - Usa solo minuscole (GA4 è case-sensitive).
-            - Evita spazi e caratteri speciali (`? % & $ !`); usa `-` o `_`.
-            - Sii coerente nella struttura dei nomi.
-            - Sii descrittivo ma conciso.
-            - Preferisci i trattini (`-`) agli underscore (`_`) quando possibile.
-            """)
-        if is_locked_client_view:
-            source_mode = "Custom values"
-            st.caption("Modalità cliente attiva: opzioni filtrate da regole cliente.")
-        else:
-            source_mode = st.radio(
-                "Traffic source mode",
-                ["Custom values", "Google Ads", "Social", "Email"],
-                horizontal=True,
-                label_visibility="collapsed"
-            )
-
-        source_default = ""
-        medium_default = ""
-        if source_mode == "Google Ads":
-            source_default = "google"
-            medium_default = "cpc"
-        elif source_mode == "Social":
-            source_default = "facebook"
-            medium_default = "social_paid"
-        elif source_mode == "Email":
-            source_default = "newsletter"
-            medium_default = "email"
-
-        # In "Custom values" non mostriamo un preset extra:
-        # l'utente compila direttamente utm_source/utm_medium nel blocco parametri.
-        if source_mode == "Custom values":
-            final_input_source = ""
-        else:
-            final_input_source = source_default
-
-        st.markdown("")
-        req_col, opt_col = st.columns(2, gap="large")
-        with req_col:
-            st.markdown('<div class="tilda-section">Required parameters</div>', unsafe_allow_html=True)
-            st.caption("Campaign source")
-            s1, s2 = st.columns([0.28, 0.72], gap="small")
-            with s1:
-                st.text_input(" ", value="utm_source", key="req_src_key", disabled=True)
-            with s2:
-                normalized_sources = sorted({normalize_token(s) for s in real_sources if normalize_token(s)})
-                if is_locked_client_view and client_rule_sources:
-                    normalized_sources = sorted(set(client_rule_sources))
-                elif client_rule_sources:
-                    normalized_sources = sorted(set(normalized_sources + client_rule_sources))
-                if not normalized_sources and not selected_prop_name:
-                    normalized_sources = sorted({normalize_token(s) for s in get_source_options() if normalize_token(s) and "altro" not in s.lower()})
-                source_options = filter_options_by_source_mode(normalized_sources, source_mode, "source")
-                if not source_options:
-                    source_options = [normalize_token(source_default)] if normalize_token(source_default) else []
-                if not is_locked_client_view:
-                    source_options = source_options + ["manuale"]
-                source_default = normalize_token(final_input_source)
-                source_index = source_options.index(source_default) if source_default in source_options else 0
-                selected_source_value = st.selectbox(
-                    "Source value",
-                    source_options,
-                    index=source_index,
-                    key="req_src_val_select",
-                    help="Su quale piattaforma o canale stai attivando questa campagna?"
+        with st.container(border=True):
+            st.markdown('<div class="builder-box-marker"></div>', unsafe_allow_html=True)
+            st.markdown('<div class="builder-card-title"><span class="builder-step-dot">1</span>URL di destinazione</div>', unsafe_allow_html=True)
+            url_col1, url_col2 = st.columns([0.16, 0.84], gap="small")
+            with url_col1:
+                url_scheme = st.selectbox(" ", ["https://", "http://"], key="builder_url_scheme")
+            with url_col2:
+                url_domain = st.text_input(
+                    "URL di destinazione",
+                    key="builder_url_domain",
+                    placeholder="thismywebsite.com",
+                    help="Dove atterrerà l’utente quando clicca sulla CTA?"
                 )
-                if selected_source_value == "manuale":
-                    utm_source = st.text_input(
-                        "Manual source",
-                        key="req_src_val_manual",
-                        placeholder="google, facebook",
+            url_domain = url_domain.strip()
+            if url_domain.startswith("http://") or url_domain.startswith("https://"):
+                destination_url = url_domain
+            else:
+                destination_url = f"{url_scheme}{url_domain}" if url_domain else ""
+            domain_hint = prop_config.get("expected_domain", "")
+            if not url_domain:
+                st.markdown('<div class="msg-warning">⚠️ Inserisci un URL completo (es. https://example.com/pagina)</div>', unsafe_allow_html=True)
+            elif not is_valid_url(destination_url):
+                st.markdown('<div class="msg-error">❌ URL non valido. Usa formato corretto: https://dominio.tld/percorso</div>', unsafe_allow_html=True)
+            elif domain_hint and domain_hint not in destination_url:
+                st.markdown(f'<div class="msg-warning">⚠️ Dominio diverso da quello atteso: {html_lib.escape(domain_hint)}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="msg-success">✅ URL valido</div>', unsafe_allow_html=True)
+
+        with st.container(border=True):
+            st.markdown('<div class="builder-box-marker"></div>', unsafe_allow_html=True)
+            st.markdown('<div class="builder-card-title"><span class="builder-step-dot">2</span>Parametri UTM</div>', unsafe_allow_html=True)
+            head_l, head_r = st.columns([0.78, 0.22], gap="small")
+            with head_r:
+                st.markdown('<div class="builder-naming-link">▸ Naming Convention ↗</div>', unsafe_allow_html=True)
+            with st.expander("Golden Rules Naming Convention", expanded=False):
+                st.markdown("""
+                - Usa solo minuscole (GA4 è case-sensitive).
+                - Evita spazi e caratteri speciali (`? % & $ !`); usa `-` o `_`.
+                - Sii coerente nella struttura dei nomi.
+                - Sii descrittivo ma conciso.
+                - Preferisci i trattini (`-`) agli underscore (`_`) quando possibile.
+                """)
+            if is_locked_client_view or active_client_config:
+                source_mode = "Custom values"
+                st.caption("Modalità cliente attiva: opzioni filtrate da regole cliente.")
+            else:
+                source_mode = st.radio(
+                    "Traffic source mode",
+                    ["Paid", "Email", "SMS", "Custom values"],
+                    horizontal=True,
+                    label_visibility="collapsed"
+                )
+
+            source_default = ""
+            medium_default = ""
+            if source_mode == "Paid":
+                source_default = "google"
+                medium_default = "cpc"
+            elif source_mode == "Email":
+                source_default = "newsletter"
+                medium_default = "email"
+            elif source_mode == "SMS":
+                source_default = "sms"
+                medium_default = "sms"
+
+            if active_client_config:
+                if client_rule_sources:
+                    source_default = normalize_token(client_rule_sources[0])
+                if client_rule_mediums:
+                    medium_default = normalize_medium_token(client_rule_mediums[0])
+
+            # In "Custom values" non mostriamo un preset extra:
+            # l'utente compila direttamente utm_source/utm_medium nel blocco parametri.
+            if source_mode == "Custom values":
+                final_input_source = source_default
+            else:
+                final_input_source = source_default
+
+            st.markdown("")
+            req_col, opt_col = st.columns(2, gap="large")
+            with req_col:
+                st.markdown('<div class="builder-subhead">REQUIRED</div>', unsafe_allow_html=True)
+                st.caption("Campaign source")
+                s1, s2 = st.columns([0.28, 0.72], gap="small")
+                with s1:
+                    st.text_input(" ", value="utm_source", key="req_src_key", disabled=True)
+                with s2:
+                    normalized_sources = [normalize_token(s) for s in real_sources if normalize_token(s)]
+                    if is_locked_client_view and client_rule_sources:
+                        normalized_sources = list(client_rule_sources)
+                    elif client_rule_sources:
+                        normalized_sources = list(normalized_sources) + list(client_rule_sources)
+                    if not normalized_sources and not selected_prop_name:
+                        normalized_sources = [normalize_token(s) for s in get_source_options() if normalize_token(s) and "altro" not in s.lower()]
+                    normalized_sources = order_by_ga4_priority(normalized_sources, real_sources, normalize_token)
+                    source_options = filter_options_by_source_mode(normalized_sources, source_mode, "source")
+                    source_options = order_by_ga4_priority(source_options, real_sources, normalize_token)
+                    if not source_options:
+                        source_options = [normalize_token(source_default)] if normalize_token(source_default) else []
+                    if not is_locked_client_view:
+                        source_options = source_options + ["manuale"]
+                    source_default = normalize_token(final_input_source)
+                    source_index = source_options.index(source_default) if source_default in source_options else 0
+                    selected_source_value = st.selectbox(
+                        "Source value",
+                        source_options,
+                        index=source_index,
+                        key="req_src_val_select",
                         help="Su quale piattaforma o canale stai attivando questa campagna?"
                     )
-                else:
-                    utm_source = selected_source_value
-                source_issues, source_suggest = validate_naming_rules(utm_source, prefer_hyphen=True)
-                if source_issues:
-                    st.markdown(
-                        f'<div class="msg-error">❌ Source non conforme: {", ".join(source_issues)}. '
-                        f'Suggerito: <b>{html_lib.escape(source_suggest)}</b></div>',
-                        unsafe_allow_html=True
-                    )
-                if client_rule_sources:
-                    src_norm = normalize_token(utm_source)
-                    if src_norm and src_norm not in set(client_rule_sources):
+                    if selected_source_value == "manuale":
+                        utm_source = st.text_input(
+                            "Manual source",
+                            key="req_src_val_manual",
+                            placeholder="google, facebook",
+                            help="Su quale piattaforma o canale stai attivando questa campagna?"
+                        )
+                    else:
+                        utm_source = selected_source_value
+                    source_issues, source_suggest = validate_naming_rules(utm_source, prefer_hyphen=True)
+                    if source_issues:
                         st.markdown(
-                            '<div class="msg-warning">⚠️ Source non presente nelle regole cliente caricate.</div>',
+                            f'<div class="msg-error">❌ Source non conforme: {", ".join(source_issues)}. '
+                            f'Suggerito: <b>{html_lib.escape(source_suggest)}</b></div>',
                             unsafe_allow_html=True
                         )
-            st.caption("Campaign medium")
-            m1, m2 = st.columns([0.28, 0.72], gap="small")
-            with m1:
-                st.text_input(" ", value="utm_medium", key="req_med_key", disabled=True)
-            with m2:
-                normalized_mediums = sorted({normalize_medium_token(m) for m in real_mediums if normalize_medium_token(m)})
-                if is_locked_client_view and client_rule_mediums:
-                    normalized_mediums = sorted(set(client_rule_mediums))
-                elif client_rule_mediums:
-                    normalized_mediums = sorted(set(normalized_mediums + client_rule_mediums))
-                # Se c'e' property selezionata, medium dropdown basato su sessionMedium GA4.
-                # Usiamo fallback tabellare solo quando GA4 non e' selezionato.
-                if not normalized_mediums and not selected_prop_name:
-                    fallback_mediums = []
-                    for row in GUIDE_TABLE_DATA:
-                        fallback_mediums.extend([normalize_medium_token(x) for x in str(row.get("utm_medium", "")).replace("|", ",").split(",") if normalize_medium_token(x)])
-                    normalized_mediums = sorted(set(fallback_mediums))
-                # Collega medium alla source selezionata usando la mappa GA4 source->medium.
-                selected_source_normalized = normalize_token(utm_source) if 'utm_source' in locals() else ""
-                mapped_mediums = sorted(source_medium_map.get(selected_source_normalized, set()))
-                if mapped_mediums:
-                    # Se abbiamo medium reali gia' mappati sulla source, NON rifiltriamo per canale:
-                    # la relazione source->medium GA4 e' la fonte di verita'.
-                    medium_options = mapped_mediums
-                else:
-                    # Fallback: nessuna coppia source-medium disponibile, applichiamo filtro di canale.
-                    medium_options = filter_options_by_source_mode(normalized_mediums, source_mode, "medium")
-                if not medium_options:
-                    medium_options = [normalize_medium_token(medium_default)] if normalize_medium_token(medium_default) else []
-                if not is_locked_client_view:
-                    medium_options = medium_options + ["manuale"]
-                default_medium_pick = normalize_medium_token(medium_default)
-                medium_index = medium_options.index(default_medium_pick) if default_medium_pick in medium_options else 0
-                selected_medium_value = st.selectbox(
-                    "Medium value",
-                    medium_options,
-                    index=medium_index,
-                    key="req_med_val_select",
-                    help="Che tipo di campagna sarà? organic, social organico, social paid, email, ecc"
-                )
-                if selected_medium_value == "manuale":
-                    utm_medium = st.text_input(
-                        "Manual medium",
-                        key="req_med_val_manual",
-                        placeholder="cpc, email, banner, article",
+                    if client_rule_sources:
+                        src_norm = normalize_token(utm_source)
+                        if src_norm and src_norm not in set(client_rule_sources):
+                            st.markdown(
+                                '<div class="msg-warning">⚠️ Source non presente nelle regole cliente caricate.</div>',
+                                unsafe_allow_html=True
+                            )
+                st.caption("Campaign medium")
+                m1, m2 = st.columns([0.28, 0.72], gap="small")
+                with m1:
+                    st.text_input(" ", value="utm_medium", key="req_med_key", disabled=True)
+                with m2:
+                    normalized_mediums = [normalize_medium_token(m) for m in real_mediums if normalize_medium_token(m)]
+                    if is_locked_client_view and client_rule_mediums:
+                        normalized_mediums = list(client_rule_mediums)
+                    elif client_rule_mediums:
+                        normalized_mediums = list(normalized_mediums) + list(client_rule_mediums)
+                    # Se c'e' property selezionata, medium dropdown basato su sessionMedium GA4.
+                    # Usiamo fallback tabellare solo quando GA4 non e' selezionato.
+                    if not normalized_mediums and not selected_prop_name:
+                        fallback_mediums = []
+                        for row in GUIDE_TABLE_DATA:
+                            fallback_mediums.extend([normalize_medium_token(x) for x in str(row.get("utm_medium", "")).replace("|", ",").split(",") if normalize_medium_token(x)])
+                        normalized_mediums = list(fallback_mediums)
+                    normalized_mediums = order_by_ga4_priority(normalized_mediums, real_mediums, normalize_medium_token)
+                    # Collega medium alla source selezionata usando la mappa GA4 source->medium.
+                    selected_source_normalized = normalize_token(utm_source) if 'utm_source' in locals() else ""
+                    mapped_mediums = source_medium_map.get(selected_source_normalized, [])
+                    if mapped_mediums:
+                        # Se abbiamo medium reali gia' mappati sulla source, NON rifiltriamo per canale:
+                        # la relazione source->medium GA4 e' la fonte di verita'.
+                        medium_options = mapped_mediums
+                    else:
+                        # Fallback: nessuna coppia source-medium disponibile, applichiamo filtro di canale.
+                        medium_options = filter_options_by_source_mode(normalized_mediums, source_mode, "medium")
+                    medium_options = order_by_ga4_priority(medium_options, real_mediums, normalize_medium_token)
+                    if not medium_options:
+                        medium_options = [normalize_medium_token(medium_default)] if normalize_medium_token(medium_default) else []
+                    if not is_locked_client_view:
+                        medium_options = medium_options + ["manuale"]
+                    default_medium_pick = normalize_medium_token(medium_default)
+                    medium_index = medium_options.index(default_medium_pick) if default_medium_pick in medium_options else 0
+                    selected_medium_value = st.selectbox(
+                        "Medium value",
+                        medium_options,
+                        index=medium_index,
+                        key="req_med_val_select",
                         help="Che tipo di campagna sarà? organic, social organico, social paid, email, ecc"
                     )
-                else:
-                    utm_medium = selected_medium_value
-                medium_issues, medium_suggest = validate_naming_rules(utm_medium, prefer_hyphen=False)
-                if medium_issues:
-                    st.markdown(
-                        f'<div class="msg-error">❌ Medium non conforme: {", ".join(medium_issues)}. '
-                        f'Suggerito: <b>{html_lib.escape(medium_suggest)}</b></div>',
-                        unsafe_allow_html=True
-                    )
-                if client_rule_mediums:
-                    med_norm = normalize_medium_token(utm_medium)
-                    if med_norm and med_norm not in set(client_rule_mediums):
+                    if selected_medium_value == "manuale":
+                        utm_medium = st.text_input(
+                            "Manual medium",
+                            key="req_med_val_manual",
+                            placeholder="cpc, email, banner, article",
+                            help="Che tipo di campagna sarà? organic, social organico, social paid, email, ecc"
+                        )
+                    else:
+                        utm_medium = selected_medium_value
+                    medium_issues, medium_suggest = validate_naming_rules(utm_medium, prefer_hyphen=False)
+                    if medium_issues:
                         st.markdown(
-                            '<div class="msg-warning">⚠️ Medium non presente nelle regole cliente caricate.</div>',
+                            f'<div class="msg-error">❌ Medium non conforme: {", ".join(medium_issues)}. '
+                            f'Suggerito: <b>{html_lib.escape(medium_suggest)}</b></div>',
                             unsafe_allow_html=True
                         )
-            st.caption("Campaign name")
-            c1, c2 = st.columns([0.28, 0.72], gap="small")
-            with c1:
-                st.text_input(" ", value="utm_campaign", key="req_cmp_key", disabled=True)
-            with c2:
-                utm_campaign = st.text_input(
-                    "Nome campagna",
-                    key="req_cmp_val",
-                    placeholder="promo, discount, sale",
-                    help="Come chiameresti questa campagna internamente?",
-                    autocomplete="new-password"
-                )
-                cmp_issues, cmp_suggest = validate_naming_rules(utm_campaign, prefer_hyphen=True)
-                if cmp_issues:
-                    st.markdown(
-                        f'<div class="msg-error">❌ Nome campagna non conforme: {", ".join(cmp_issues)}. '
-                        f'Suggerito: <b>{html_lib.escape(cmp_suggest)}</b></div>',
-                        unsafe_allow_html=True
+                    if client_rule_mediums:
+                        med_norm = normalize_medium_token(utm_medium)
+                        if med_norm and med_norm not in set(client_rule_mediums):
+                            st.markdown(
+                                '<div class="msg-warning">⚠️ Medium non presente nelle regole cliente caricate.</div>',
+                                unsafe_allow_html=True
+                            )
+                st.caption("Campaign name")
+                c1, c2 = st.columns([0.28, 0.72], gap="small")
+                with c1:
+                    st.text_input(" ", value="utm_campaign", key="req_cmp_key", disabled=True)
+                with c2:
+                    utm_campaign = st.text_input(
+                        "Nome campagna",
+                        key="req_cmp_val",
+                        placeholder="promo, discount, sale",
+                        help="Come chiameresti questa campagna internamente?",
+                        autocomplete="new-password"
                     )
-            type_col1, type_col2 = st.columns([0.28, 0.72], gap="small")
-            with type_col1:
-                st.text_input(" ", value="campaign_type", key="req_typ_key", disabled=True)
-            with type_col2:
-                campaign_type = st.text_input(
-                    "Tipo campagna",
-                    key="req_typ_val",
-                    placeholder="always-on, promo, launch",
-                    help="Tipologia della campagna (es. promo, launch, always-on)."
-                )
-                type_issues, type_suggest = validate_naming_rules(campaign_type, prefer_hyphen=True)
-                if type_issues:
-                    st.markdown(
-                        f'<div class="msg-error">❌ Tipo campagna non conforme: {", ".join(type_issues)}. '
-                        f'Suggerito: <b>{html_lib.escape(type_suggest)}</b></div>',
-                        unsafe_allow_html=True
+                    cmp_issues, cmp_suggest = validate_naming_rules(utm_campaign, prefer_hyphen=True)
+                    if cmp_issues:
+                        st.markdown(
+                            f'<div class="msg-error">❌ Nome campagna non conforme: {", ".join(cmp_issues)}. '
+                            f'Suggerito: <b>{html_lib.escape(cmp_suggest)}</b></div>',
+                            unsafe_allow_html=True
+                        )
+                type_col1, type_col2 = st.columns([0.28, 0.72], gap="small")
+                with type_col1:
+                    st.text_input(" ", value="campaign_type", key="req_typ_key", disabled=True)
+                with type_col2:
+                    campaign_type = st.text_input(
+                        "Tipo campagna",
+                        key="req_typ_val",
+                        placeholder="always-on, promo, launch",
+                        help="Tipologia della campagna (es. promo, launch, always-on)."
                     )
-            meta_col1, meta_col2 = st.columns(2, gap="small")
-            with meta_col1:
-                campaign_start_date = st.date_input(
-                    "Data di inizio campagna",
-                    datetime.today(),
-                    key="campaign_start_date",
-                    format="DD/MM/YYYY",
-                    help="Quando partirà la campagna?"
-                )
-            with meta_col2:
-                campaign_language = st.text_input(
-                    "Country/Lingua",
-                    key="campaign_country_language",
-                    placeholder="es. it, de, fr",
-                    help="In che lingua è la comunicazione principale di questa campagna?"
-                )
-                lang_issues, lang_suggest = validate_naming_rules(campaign_language, prefer_hyphen=True)
-                if lang_issues:
-                    st.markdown(
-                        f'<div class="msg-error">❌ Country/Lingua non conforme: {", ".join(lang_issues)}. '
-                        f'Suggerito: <b>{html_lib.escape(lang_suggest)}</b></div>',
-                        unsafe_allow_html=True
+                    type_issues, type_suggest = validate_naming_rules(campaign_type, prefer_hyphen=True)
+                    if type_issues:
+                        st.markdown(
+                            f'<div class="msg-error">❌ Tipo campagna non conforme: {", ".join(type_issues)}. '
+                            f'Suggerito: <b>{html_lib.escape(type_suggest)}</b></div>',
+                            unsafe_allow_html=True
+                        )
+                meta_col1, meta_col2 = st.columns(2, gap="small")
+                with meta_col1:
+                    campaign_start_date = st.date_input(
+                        "Data di inizio campagna",
+                        datetime.today(),
+                        key="campaign_start_date",
+                        format="DD/MM/YYYY",
+                        help="Quando partirà la campagna?"
                     )
+                with meta_col2:
+                    campaign_language = st.text_input(
+                        "Country/Lingua",
+                        key="campaign_country_language",
+                        placeholder="es. it, de, fr",
+                        help="In che lingua è la comunicazione principale di questa campagna?"
+                    )
+                    lang_issues, lang_suggest = validate_naming_rules(campaign_language, prefer_hyphen=True)
+                    if lang_issues:
+                        st.markdown(
+                            f'<div class="msg-error">❌ Country/Lingua non conforme: {", ".join(lang_issues)}. '
+                            f'Suggerito: <b>{html_lib.escape(lang_suggest)}</b></div>',
+                            unsafe_allow_html=True
+                        )
 
-        with opt_col:
-            st.markdown('<div class="tilda-section">Optional parameters</div>', unsafe_allow_html=True)
-            st.caption("Campaign content")
-            o1, o2 = st.columns([0.28, 0.72], gap="small")
-            with o1:
-                st.text_input(" ", value="utm_content", key="opt_cnt_key", disabled=True)
-            with o2:
-                utm_content = st.text_input(
-                    "Content",
-                    key="opt_cnt_val",
-                    placeholder="cta, banner, image",
-                    help="Dettaglia variante creativa, posizione o formato del contenuto."
-                )
-                cnt_issues, cnt_suggest = validate_naming_rules(utm_content, prefer_hyphen=True)
-                if cnt_issues:
-                    st.markdown(
-                        f'<div class="msg-error">❌ Content non conforme: {", ".join(cnt_issues)}. '
-                        f'Suggerito: <b>{html_lib.escape(cnt_suggest)}</b></div>',
-                        unsafe_allow_html=True
+            with opt_col:
+                st.markdown('<div class="builder-subhead">OPTIONAL</div>', unsafe_allow_html=True)
+                st.caption("Campaign content")
+                o1, o2 = st.columns([0.28, 0.72], gap="small")
+                with o1:
+                    st.text_input(" ", value="utm_content", key="opt_cnt_key", disabled=True)
+                with o2:
+                    utm_content = st.text_input(
+                        "Content",
+                        key="opt_cnt_val",
+                        placeholder="cta, banner, image",
+                        help="Dettaglia variante creativa, posizione o formato del contenuto."
                     )
-            st.caption("Campaign term")
-            t1, t2 = st.columns([0.28, 0.72], gap="small")
-            with t1:
-                st.text_input(" ", value="utm_term", key="opt_trm_key", disabled=True)
-            with t2:
-                utm_term = st.text_input(
-                    "Term",
-                    key="opt_trm_val",
-                    placeholder="keyword, prospecting, retargeting",
-                    help="Usato per keyword o segmenti specifici della campagna."
-                )
-                trm_issues, trm_suggest = validate_naming_rules(utm_term, prefer_hyphen=True)
-                if trm_issues:
-                    st.markdown(
-                        f'<div class="msg-error">❌ Term non conforme: {", ".join(trm_issues)}. '
-                        f'Suggerito: <b>{html_lib.escape(trm_suggest)}</b></div>',
-                        unsafe_allow_html=True
+                    cnt_issues, cnt_suggest = validate_naming_rules(utm_content, prefer_hyphen=True)
+                    if cnt_issues:
+                        st.markdown(
+                            f'<div class="msg-error">❌ Content non conforme: {", ".join(cnt_issues)}. '
+                            f'Suggerito: <b>{html_lib.escape(cnt_suggest)}</b></div>',
+                            unsafe_allow_html=True
+                        )
+                st.caption("Campaign term")
+                t1, t2 = st.columns([0.28, 0.72], gap="small")
+                with t1:
+                    st.text_input(" ", value="utm_term", key="opt_trm_key", disabled=True)
+                with t2:
+                    utm_term = st.text_input(
+                        "Term",
+                        key="opt_trm_val",
+                        placeholder="keyword, prospecting, retargeting",
+                        help="Usato per keyword o segmenti specifici della campagna."
                     )
+                    trm_issues, trm_suggest = validate_naming_rules(utm_term, prefer_hyphen=True)
+                    if trm_issues:
+                        st.markdown(
+                            f'<div class="msg-error">❌ Term non conforme: {", ".join(trm_issues)}. '
+                            f'Suggerito: <b>{html_lib.escape(trm_suggest)}</b></div>',
+                            unsafe_allow_html=True
+                        )
 
         p_src = normalize_token(utm_source)
         p_med = normalize_medium_token(utm_medium)
@@ -2179,7 +2927,350 @@ def show_dashboard():
                     st.error(f"Errore analisi URL: {e}")
 
     # ==============================================================================
-    # TAB 3: UTM HISTORY & TRACKING
+    # TAB 3: CLIENT CONFIGURATION
+    # ==============================================================================
+    with tab_client_config:
+        st.markdown("### Client Configuration")
+        st.markdown("Configura app cliente: upload UTM Builder, selezione GA4 e link dedicato.")
+
+        # Registro rapido configurazioni salvate (ultimo update + metadati principali)
+        cfg_rows = []
+        for cfg_id in list_saved_client_ids():
+            cfg_payload = load_client_config(cfg_id) or {}
+            ga4_prop_id = str(cfg_payload.get("ga4_property_id", "")).replace("properties/", "").strip()
+            ga4_prop_name = str(cfg_payload.get("ga4_property_name", "")).strip()
+            if ga4_prop_name and ga4_prop_id:
+                ga4_prop_display = f"{ga4_prop_name} ({ga4_prop_id})"
+            elif ga4_prop_id:
+                ga4_prop_display = ga4_prop_id
+            elif ga4_prop_name:
+                ga4_prop_display = ga4_prop_name
+            else:
+                ga4_prop_display = "Non impostata"
+            cfg_rows.append(
+                {
+                    "client_id": cfg_id,
+                    "version": cfg_payload.get("version", "-"),
+                    "updated_at": cfg_payload.get("updated_at", "-"),
+                    "updated_by": cfg_payload.get("updated_by", "-"),
+                    "ga4_account": cfg_payload.get("ga4_client_name", "-"),
+                    "ga4_property": ga4_prop_display,
+                    "ga4_property_id": ga4_prop_id or "-",
+                    "source_file_name": cfg_payload.get("source_file_name", "-"),
+                    "shared_link": str(cfg_payload.get("shared_link", "") or "-"),
+                }
+            )
+        if st.session_state.get("client_id_lock"):
+            st.warning("Modalità cliente bloccata attiva in questa sessione.")
+            if st.button("Sblocca modalità cliente", key="unlock_client_mode_btn"):
+                st.session_state.client_id_lock = ""
+                st.session_state.client_lock_error = ""
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+                st.rerun()
+
+        existing_client_ids = list_saved_client_ids()
+        if "cfg_manage_mode" not in st.session_state:
+            st.session_state.cfg_manage_mode = "Modifica configurazione" if existing_client_ids else "Nuova configurazione aggiuntiva"
+        if "cfg_selected_existing_client" not in st.session_state:
+            st.session_state.cfg_selected_existing_client = existing_client_ids[0] if existing_client_ids else ""
+
+        if "cfg_selected_client" not in st.session_state:
+            st.session_state.cfg_selected_client = "Nuova configurazione"
+        if "cfg_form_loaded_client" not in st.session_state:
+            st.session_state.cfg_form_loaded_client = ""
+        if "cfg_client_id_input" not in st.session_state:
+            st.session_state.cfg_client_id_input = ""
+        if "cfg_ga4_client_name" not in st.session_state:
+            st.session_state.cfg_ga4_client_name = ""
+        if "cfg_ga4_property_id" not in st.session_state:
+            st.session_state.cfg_ga4_property_id = ""
+        if "cfg_ga4_property_name" not in st.session_state:
+            st.session_state.cfg_ga4_property_name = ""
+        if "cfg_expected_domain" not in st.session_state:
+            st.session_state.cfg_expected_domain = ""
+        if "cfg_default_country" not in st.session_state:
+            st.session_state.cfg_default_country = "it"
+        if "cfg_rules_rows" not in st.session_state:
+            st.session_state.cfg_rules_rows = []
+        if "cfg_rules_file_name" not in st.session_state:
+            st.session_state.cfg_rules_file_name = ""
+        if "cfg_rules_file_sha256" not in st.session_state:
+            st.session_state.cfg_rules_file_sha256 = ""
+        if "cfg_base_url" not in st.session_state:
+            st.session_state.cfg_base_url = "https://utm-builder.streamlit.app/"
+
+        manage_options = ["Modifica configurazione", "Nuova configurazione aggiuntiva"]
+        st.radio(
+            "Operazione",
+            manage_options,
+            key="cfg_manage_mode",
+            horizontal=True,
+        )
+
+        selected_cfg = "Nuova configurazione"
+        if st.session_state.cfg_manage_mode == "Modifica configurazione":
+            if existing_client_ids:
+                if st.session_state.get("cfg_selected_existing_client", "") not in existing_client_ids:
+                    st.session_state.cfg_selected_existing_client = existing_client_ids[0]
+                selected_cfg = st.selectbox(
+                    "Configurazione da modificare",
+                    existing_client_ids,
+                    key="cfg_selected_existing_client",
+                )
+            else:
+                st.info("Nessuna configurazione esistente: passa a 'Nuova configurazione aggiuntiva'.")
+        else:
+            st.caption("Stai creando una nuova configurazione. Inserisci un nuovo Client ID nel form.")
+
+        st.session_state.cfg_selected_client = selected_cfg
+
+        if selected_cfg != "Nuova configurazione" and st.session_state.cfg_form_loaded_client != selected_cfg:
+            cfg = load_client_config(selected_cfg) or {}
+            prop_cfg = cfg.get("property_config") if isinstance(cfg.get("property_config"), dict) else {}
+            st.session_state.cfg_client_id_input = str(cfg.get("client_id", selected_cfg))
+            st.session_state.cfg_ga4_client_name = str(cfg.get("ga4_client_name", ""))
+            st.session_state.cfg_ga4_property_id = str(cfg.get("ga4_property_id", ""))
+            st.session_state.cfg_ga4_property_name = str(cfg.get("ga4_property_name", ""))
+            st.session_state.cfg_expected_domain = str(prop_cfg.get("expected_domain", ""))
+            st.session_state.cfg_default_country = str(prop_cfg.get("default_country", "it") or "it")
+            st.session_state.cfg_rules_rows = list(cfg.get("rules_rows", []) or [])
+            st.session_state.cfg_rules_file_name = str(cfg.get("source_file_name", ""))
+            st.session_state.cfg_rules_file_sha256 = str(cfg.get("source_file_sha256", ""))
+            st.session_state.cfg_form_loaded_client = selected_cfg
+            st.rerun()
+        if selected_cfg == "Nuova configurazione" and st.session_state.cfg_form_loaded_client:
+            st.session_state.cfg_form_loaded_client = ""
+            st.session_state.cfg_client_id_input = ""
+            st.session_state.cfg_ga4_client_name = ""
+            st.session_state.cfg_ga4_property_id = ""
+            st.session_state.cfg_ga4_property_name = ""
+            st.session_state.cfg_expected_domain = ""
+            st.session_state.cfg_default_country = "it"
+            st.session_state.cfg_rules_rows = []
+            st.session_state.cfg_rules_file_name = ""
+            st.session_state.cfg_rules_file_sha256 = ""
+            st.rerun()
+
+        if cfg_rows:
+            st.markdown("#### Stato configurazioni clienti")
+            st.dataframe(
+                pd.DataFrame(cfg_rows).sort_values(by=["updated_at", "client_id"], ascending=[False, True]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.markdown("#### Recupera o rigenera link cliente")
+            recover_client_id = st.selectbox(
+                "Cliente da recuperare",
+                list_saved_client_ids(),
+                key="recover_client_id_select",
+            )
+            recover_cfg = load_client_config(recover_client_id) or {}
+            current_shared_link = str(recover_cfg.get("shared_link", "")).strip()
+            st.text_input(
+                "Link cliente corrente",
+                value=current_shared_link,
+                disabled=True,
+            )
+            if st.button("Rigenera link cliente", key="regen_client_link_btn"):
+                if not CLIENT_LINK_SECRET:
+                    st.warning("CLIENT_LINK_SECRET non configurato: impossibile rigenerare il link firmato.")
+                else:
+                    previous_link = str(recover_cfg.get("shared_link", "")).strip()
+                    base_url = str(st.session_state.get("cfg_base_url", "")).strip() or "https://utm-builder.streamlit.app/"
+                    if previous_link:
+                        try:
+                            parsed_prev = urlparse(previous_link)
+                            if parsed_prev.scheme and parsed_prev.netloc:
+                                base_url = f"{parsed_prev.scheme}://{parsed_prev.netloc}{parsed_prev.path}"
+                        except Exception:
+                            pass
+                    if not base_url.startswith(("http://", "https://")):
+                        base_url = f"https://{base_url}"
+                    base_url = base_url.rstrip("/")
+
+                    new_sig = sign_client_id(recover_client_id)
+                    regenerated_link = f"{base_url}/?client_id={recover_client_id}&sig={new_sig}"
+
+                    recover_cfg["shared_link"] = regenerated_link
+                    recover_cfg["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    recover_cfg["updated_by"] = st.session_state.get("user_email", "")
+                    save_client_config(recover_client_id, recover_cfg)
+                    st.success("Link cliente rigenerato.")
+                    st.code(regenerated_link, language="text")
+        else:
+            st.info("Nessuna configurazione cliente salvata.")
+
+        st.markdown("#### 1) Carica file UTM Builder")
+        uploaded_rules_file = st.file_uploader(
+            "File UTM Builder (xlsx/csv)",
+            type=["xlsx", "xls", "csv"],
+            key="cfg_rules_uploader",
+        )
+        if uploaded_rules_file is not None:
+            uploaded_bytes = uploaded_rules_file.getvalue()
+            uploaded_sha = hashlib.sha256(uploaded_bytes).hexdigest()
+            if uploaded_sha != st.session_state.get("cfg_rules_file_sha256", ""):
+                try:
+                    parsed_rows = parse_rules_rows_from_uploaded_file(uploaded_rules_file.name, uploaded_bytes)
+                    st.session_state.cfg_rules_rows = parsed_rows
+                    st.session_state.cfg_rules_file_name = str(uploaded_rules_file.name)
+                    st.session_state.cfg_rules_file_sha256 = uploaded_sha
+                    st.success(f"File caricato: {uploaded_rules_file.name} ({len(parsed_rows)} righe)")
+                except Exception as e:
+                    st.error(f"Errore lettura file UTM Builder: {e}")
+        elif st.session_state.get("cfg_rules_file_name"):
+            st.caption(f"File regole corrente: {st.session_state.get('cfg_rules_file_name')}")
+
+        rules_preview_cfg = {"rules_rows": st.session_state.get("cfg_rules_rows", [])}
+        prev_sources, prev_mediums, prev_campaign_types = extract_client_rule_values(rules_preview_cfg)
+        st.caption(
+            f"Regole estratte: source={len(prev_sources)} | medium={len(prev_mediums)} | campaign_type={len(prev_campaign_types)}"
+        )
+
+        current_rows = st.session_state.get("cfg_rules_rows", []) or []
+        if current_rows:
+            st.markdown("#### Anteprima file UTM Builder")
+            preview_df = pd.DataFrame(current_rows)
+            if "__sheet_name" in preview_df.columns:
+                sheet_names = [s for s in preview_df["__sheet_name"].fillna("").astype(str).unique().tolist() if s]
+                if sheet_names:
+                    preview_tabs = st.tabs([f"Foglio: {s}" for s in sheet_names])
+                    for i, sheet_name in enumerate(sheet_names):
+                        with preview_tabs[i]:
+                            sheet_df = preview_df[preview_df["__sheet_name"].astype(str) == sheet_name].copy()
+                            sheet_df = sheet_df.drop(columns=["__sheet_name"], errors="ignore")
+                            st.dataframe(sheet_df.head(20), use_container_width=True, hide_index=True)
+                            if len(sheet_df) > 20:
+                                st.caption(f"Mostrate 20 righe su {len(sheet_df)} del foglio '{sheet_name}'.")
+                else:
+                    st.dataframe(preview_df.head(20), use_container_width=True, hide_index=True)
+            else:
+                st.dataframe(preview_df.head(20), use_container_width=True, hide_index=True)
+            if len(preview_df) > 20:
+                st.caption(f"Totale righe importate: {len(preview_df)}.")
+
+        if "ga4_accounts" not in st.session_state:
+            with st.spinner("Caricamento account GA4..."):
+                st.session_state.ga4_accounts = get_ga4_accounts_structure(st.session_state.credentials)
+        accounts_structure = st.session_state.get("ga4_accounts", [])
+        if not isinstance(accounts_structure, list):
+            accounts_structure = []
+
+        selected_cfg_account_name = ""
+        selected_cfg_property_name = ""
+        selected_cfg_property_id = ""
+        st.markdown("#### 2) Seleziona account e property GA4")
+        if accounts_structure:
+            acc_names = [str(a.get("display_name", "")) for a in accounts_structure]
+            pref_acc_name = str(st.session_state.get("cfg_ga4_client_name", "")).strip().lower()
+            acc_idx = 0
+            if pref_acc_name:
+                for idx, name in enumerate(acc_names):
+                    if name.strip().lower() == pref_acc_name:
+                        acc_idx = idx
+                        break
+            selected_cfg_account_name = st.selectbox("Account GA4 cliente", acc_names, index=acc_idx, key="cfg_ga4_account_select")
+            selected_acc = next((a for a in accounts_structure if str(a.get("display_name", "")) == selected_cfg_account_name), None)
+
+            prop_list = (selected_acc or {}).get("properties", []) or []
+            if prop_list:
+                prop_labels = []
+                prop_by_label = {}
+                for p in prop_list:
+                    prop_name = str(p.get("display_name", "")).strip()
+                    prop_id_raw = str(p.get("property_id", "")).replace("properties/", "").strip()
+                    label = f"{prop_name} ({prop_id_raw})" if prop_id_raw else prop_name
+                    prop_labels.append(label)
+                    prop_by_label[label] = p
+                pref_prop_id = str(st.session_state.get("cfg_ga4_property_id", "")).replace("properties/", "").strip()
+                prop_idx = 0
+                if pref_prop_id:
+                    for idx, label in enumerate(prop_labels):
+                        candidate = prop_by_label.get(label, {})
+                        candidate_id = str(candidate.get("property_id", "")).replace("properties/", "").strip()
+                        if candidate_id == pref_prop_id:
+                            prop_idx = idx
+                            break
+                selected_label = st.selectbox("Property GA4 cliente", prop_labels, index=prop_idx, key="cfg_ga4_property_select")
+                selected_prop = prop_by_label.get(selected_label, {})
+                selected_cfg_property_name = str(selected_prop.get("display_name", "")).strip()
+                selected_cfg_property_id = str(selected_prop.get("property_id", "")).replace("properties/", "").strip()
+            else:
+                st.warning("Nessuna property disponibile per l'account selezionato.")
+        else:
+            st.warning("Nessun account GA4 disponibile.")
+
+        if selected_cfg_account_name:
+            st.session_state.cfg_ga4_client_name = selected_cfg_account_name
+        if selected_cfg_property_name:
+            st.session_state.cfg_ga4_property_name = selected_cfg_property_name
+        if selected_cfg_property_id:
+            st.session_state.cfg_ga4_property_id = selected_cfg_property_id
+
+        st.markdown("#### 3) Configurazione app cliente")
+        st.text_input("Client ID", key="cfg_client_id_input", placeholder="es. chicco_2023")
+        st.text_input("Dominio atteso", key="cfg_expected_domain", placeholder="es. chicco.it")
+        st.text_input("Country default", key="cfg_default_country", placeholder="es. it")
+        st.text_input(
+            "Base URL app (per link cliente)",
+            key="cfg_base_url",
+            placeholder="es. https://utm-builder.streamlit.app/ oppure http://localhost:8503",
+        )
+
+        st.markdown("#### 4) Salva e genera link cliente")
+        if st.button("Salva configurazione cliente", key="save_client_config_btn", type="primary"):
+            cid = normalize_client_id(st.session_state.get("cfg_client_id_input", ""))
+            if not cid:
+                st.error("Inserisci un Client ID valido.")
+            elif st.session_state.get("cfg_manage_mode") == "Nuova configurazione aggiuntiva" and cid in existing_client_ids:
+                st.error("Questo Client ID esiste già. Per aggiornare usa 'Modifica configurazione' oppure inserisci un nuovo Client ID.")
+            else:
+                existing_cfg = load_client_config(cid) or {}
+                base_url = str(st.session_state.get("cfg_base_url", "")).strip() or "https://utm-builder.streamlit.app/"
+                if not base_url.startswith(("http://", "https://")):
+                    base_url = f"https://{base_url}"
+                base_url = base_url.rstrip("/")
+
+                shared_link = str(existing_cfg.get("shared_link", "")).strip()
+                if CLIENT_LINK_SECRET:
+                    sig = sign_client_id(cid)
+                    shared_link = f"{base_url}/?client_id={cid}&sig={sig}"
+
+                payload = dict(existing_cfg)
+                payload.update(
+                    {
+                        "client_id": cid,
+                        "version": int(existing_cfg.get("version", 0) or 0) + 1,
+                        "created_at": str(existing_cfg.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                        "updated_by": st.session_state.get("user_email", ""),
+                        "source_file_name": str(st.session_state.get("cfg_rules_file_name", "")).strip(),
+                        "source_file_sha256": str(st.session_state.get("cfg_rules_file_sha256", "")).strip(),
+                        "ga4_client_name": str(st.session_state.get("cfg_ga4_client_name", "")).strip(),
+                        "ga4_property_name": str(st.session_state.get("cfg_ga4_property_name", "")).strip(),
+                        "ga4_property_id": str(st.session_state.get("cfg_ga4_property_id", "")).strip(),
+                        "property_config": {
+                            "default_country": normalize_token(st.session_state.get("cfg_default_country", "")) or "it",
+                            "expected_domain": str(st.session_state.get("cfg_expected_domain", "")).strip().lower(),
+                        },
+                        "rules_rows": list(st.session_state.get("cfg_rules_rows", []) or existing_cfg.get("rules_rows", []) or []),
+                        "shared_link": shared_link,
+                        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
+
+                saved_path = save_client_config(cid, payload)
+                st.success(f"Configurazione salvata: {saved_path.name}")
+                if CLIENT_LINK_SECRET:
+                    st.code(shared_link, language="text")
+                else:
+                    st.warning("CLIENT_LINK_SECRET non configurato: link firmato non generato.")
+
+    # ==============================================================================
+    # TAB 4: UTM HISTORY & TRACKING
     # ==============================================================================
     with tab_history:
         st.markdown("### UTM History & Tracking")
@@ -2273,6 +3364,8 @@ if __name__ == "__main__":
         st.session_state.client_id_lock = ""
     if "client_lock_error" not in st.session_state:
         st.session_state.client_lock_error = ""
+    if "builder_selected_client_id" not in st.session_state:
+        st.session_state.builder_selected_client_id = ""
 
     # Scopes setup for profile info
     if 'https://www.googleapis.com/auth/userinfo.profile' not in SCOPES:
@@ -2281,6 +3374,14 @@ if __name__ == "__main__":
         SCOPES.append('https://www.googleapis.com/auth/userinfo.email')
 
     # Lock cliente da query params firmati (persistente in sessione).
+    raw_open_chat = str(st.query_params.get("open_chat", "")).strip().lower()
+    if raw_open_chat in {"1", "true", "yes"}:
+        st.session_state.chat_visible = True
+        try:
+            del st.query_params["open_chat"]
+        except Exception:
+            pass
+
     raw_client_qp = normalize_client_id(st.query_params.get("client_id", ""))
     if raw_client_qp:
         locked_client_id, lock_error = get_client_lock_from_query_params()
@@ -2363,3 +3464,6 @@ if __name__ == "__main__":
         if st.session_state.get("client_lock_error"):
             st.warning(st.session_state.get("client_lock_error"))
         show_login_page()
+
+
+

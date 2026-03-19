@@ -1,6 +1,4 @@
 import streamlit as st
-import os
-import base64
 import re
 import json
 from datetime import datetime
@@ -9,17 +7,6 @@ from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 import google.generativeai as genai
 import ga4_mcp_tools  # Importa il modulo con i tool GA4
-
-
-# -------------------------
-# Utility (UI / cleaning)
-# -------------------------
-def get_base64_image(image_path: str) -> Optional[str]:
-    """Helper per convertire immagini in base64 (se necessario per UI future)"""
-    if os.path.exists(image_path):
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode()
-    return None
 
 
 def _dedupe_repetitions(text: str) -> str:
@@ -725,11 +712,15 @@ def render_chatbot_interface(
     if preferred_pid_ctx:
         st.session_state.utm_context["ga4_property_id"] = preferred_pid_ctx
 
-    # Carica icona
-    base_path = os.path.dirname(os.path.abspath(__file__))
-    icon_path = os.path.join(base_path, "wr_assistant_icon.png.png")
-    icon_b64 = get_base64_image(icon_path)
-    
+    def _queue_user_message(text: str) -> None:
+        clean_text = (text or "").strip()
+        if not clean_text or st.session_state.chat_is_responding:
+            return
+        st.session_state.messages.append({"role": "user", "content": clean_text})
+        st.session_state.pending_user_text = clean_text
+        st.session_state.chat_is_responding = True
+        st.rerun()
+
     # CSS per Floating Button e Window
     # Usa selettori molto specifici e un container ID unico per evitare conflitti
     
@@ -755,27 +746,34 @@ def render_chatbot_interface(
         
         div[data-testid="stColumn"]:has(div.fab-unique-marker) button {{
             pointer-events: auto;
-            width: 70px !important;
-            height: 70px !important;
+            width: 64px !important;
+            height: 64px !important;
             border-radius: 50% !important;
-            border: none !important;
-            box-shadow: 0 6px 16px rgba(0,0,0,0.2) !important;
+            border: 1px solid rgba(102, 198, 172, 0.45) !important;
+            box-shadow: 0 10px 22px rgba(8,14,28,0.45) !important;
             transition: transform 0.2s, box-shadow 0.2s !important;
-            background-color: white !important;
-            background-size: cover !important;
-            background-position: center !important;
-            background-repeat: no-repeat !important;
+            background: #141d2d !important;
             display: block !important;
             margin: 0 !important;
+            color: transparent !important;
         }}
         
         div[data-testid="stColumn"]:has(div.fab-unique-marker) button:hover {{
             transform: scale(1.05);
-            box-shadow: 0 8px 20px rgba(0,0,0,0.3) !important;
+            box-shadow: 0 14px 28px rgba(8,14,28,0.58), 0 0 0 1px rgba(102,198,172,0.45) !important;
         }}
         
         div[data-testid="stColumn"]:has(div.fab-unique-marker) button p {{
             display: none !important;
+        }}
+        div[data-testid="stColumn"]:has(div.fab-unique-marker) button::after {{
+            content: "💬";
+            font-size: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #66c6ac;
         }}
         
         /* Nasconde il marker stesso */
@@ -783,29 +781,6 @@ def render_chatbot_interface(
             display: none;
         }}
     """
-    
-    if icon_b64:
-        fab_css += f"""
-        div[data-testid="stColumn"]:has(div.fab-unique-marker) button {{
-            background-image: url("data:image/png;base64,{icon_b64}") !important;
-        }}
-        """
-    else:
-        fab_css += """
-        div[data-testid="stColumn"]:has(div.fab-unique-marker) button {
-            background-color: #2563eb !important;
-        }
-        div[data-testid="stColumn"]:has(div.fab-unique-marker) button::after {
-            content: "💬";
-            font-size: 30px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            color: white;
-        }
-        """
-
     # 2. STYLE PER LA WINDOW
     window_css = """
         /* ------------------------------------------------
@@ -817,15 +792,15 @@ def render_chatbot_interface(
             position: fixed;
             bottom: 110px;
             right: 30px;
-            width: 380px !important;
+            width: 560px !important;
             max-width: 90vw;
-            height: 600px !important;
+            height: 640px !important;
             max-height: 80vh;
-            background-color: white;
-            border-radius: 16px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+            background-color: hsl(210, 20%, 98%);
+            border-radius: 12px;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.24);
             z-index: 999998;
-            border: 1px solid #e5e7eb;
+            border: 1px solid hsl(210, 18%, 90%);
             overflow: hidden;
             display: flex;
             flex-direction: column;
@@ -845,14 +820,15 @@ def render_chatbot_interface(
 
         /* Scroll storico messaggi in area dedicata */
         .chat-messages-area {
-            height: clamp(180px, 48vh, 360px);
+            height: auto;
+            max-height: 320px;
             min-height: 0;
             overflow-y: auto;
-            padding: 10px 8px;
+            padding: 24px 18px 4px 18px;
             display: flex;
-            flex-direction: column-reverse;
-            gap: 8px;
-            background: #f9fafb;
+            flex-direction: column;
+            gap: 12px;
+            background: hsl(210, 20%, 98%);
             flex: 0 0 auto;
             overflow-anchor: none;
         }
@@ -865,9 +841,9 @@ def render_chatbot_interface(
         }
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="stForm"] {
-            padding: 8px 8px 0 !important;
-            border-top: 1px solid #e5e7eb;
-            background: white;
+            padding: 14px 14px 8px !important;
+            border-top: 1px solid hsl(210, 18%, 90%);
+            background: #ffffff;
             position: sticky;
             bottom: 0;
             z-index: 3;
@@ -889,16 +865,32 @@ def render_chatbot_interface(
         }
 
         .chat-header {
-            background: #2563eb;
-            color: white;
-            padding: 12px 16px;
+            background: hsl(224, 64%, 10%);
+            color: #ffffff;
+            padding: 22px 22px;
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            font-weight: 600;
-            font-size: 15px;
-            border-bottom: 1px solid #1d4ed8;
+            gap: 12px;
+            font-weight: 700;
+            font-size: 44px;
+            font-family: "Space Grotesk", sans-serif;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
             flex-shrink: 0;
+            line-height: 1.2;
+        }
+        .chat-header-logo {
+            width: 46px;
+            height: 46px;
+            border-radius: 50%;
+            background: hsl(163, 74%, 58%);
+            color: hsl(224, 64%, 10%);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-family: "Space Grotesk", sans-serif;
+            font-size: 28px;
+            line-height: 1;
         }
         .debug-badge {
             display: inline-flex;
@@ -915,43 +907,129 @@ def render_chatbot_interface(
         }
 
         .msg-bubble {
-            padding: 10px 14px;
-            border-radius: 12px;
-            font-size: 14px;
-            line-height: 1.5;
-            max-width: 85%;
+            padding: 14px 18px;
+            border-radius: 20px;
+            font-size: 19px;
+            line-height: 1.35;
+            max-width: 86%;
             word-wrap: break-word;
+            font-family: "DM Sans", sans-serif;
         }
         .msg-user {
-            background: #2563eb;
-            color: white;
+            background: hsl(224, 64%, 10%);
+            color: #ffffff;
             align-self: flex-end;
-            border-bottom-right-radius: 2px;
+            border-bottom-right-radius: 20px;
         }
         .msg-bot {
-            background: white;
-            color: #1f2937;
-            border: 1px solid #e5e7eb;
+            background: hsl(162, 68%, 86%);
+            color: hsl(224, 64%, 10%);
+            border: 1px solid rgba(83, 231, 188, 0.45);
             align-self: flex-start;
-            border-bottom-left-radius: 2px;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+            border-bottom-left-radius: 20px;
+        }
+        .msg-row-bot {
+            display: flex;
+            justify-content: flex-start;
+            margin-bottom: 6px;
+            gap: 12px;
+            align-items: flex-start;
+        }
+        .msg-row-user {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 8px;
+        }
+        .bot-avatar {
+            width: 50px;
+            height: 50px;
+            border-radius: 999px;
+            border: 2px solid #ffffff;
+            background: hsl(163, 74%, 58%);
+            color: #ffffff;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-family: "Space Grotesk", sans-serif;
+            font-weight: 700;
+            font-size: 28px;
+            flex-shrink: 0;
         }
         .msg-loading {
             display: inline-flex;
             align-items: center;
             gap: 8px;
-            color: #334155;
-            background: #eff6ff;
-            border-color: #bfdbfe;
+            color: hsl(224, 64%, 10%);
+            background: hsl(162, 68%, 86%);
+            border-color: rgba(83, 231, 188, 0.45);
         }
         .chat-loader {
             width: 14px;
             height: 14px;
             border-radius: 50%;
-            border: 2px solid #bfdbfe;
-            border-top-color: #2563eb;
+            border: 2px solid rgba(102, 198, 172, 0.35);
+            border-top-color: hsl(163, 40%, 60%);
             animation: chat-loader-spin .8s linear infinite;
             flex-shrink: 0;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stTextInput"] input {
+            border: 1px solid #e9edf2 !important;
+            border-radius: 14px !important;
+            background: #ffffff !important;
+            color: hsl(220, 30%, 12%) !important;
+            font-family: "DM Sans", sans-serif !important;
+            min-height: 56px !important;
+            font-size: 18px !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stTextInput"] input:focus {
+            border-color: hsl(163, 74%, 58%) !important;
+            box-shadow: 0 0 0 3px rgba(83,231,188,0.22) !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stFormSubmitButton"] button {
+            border-radius: 14px !important;
+            border: 1px solid rgba(83,231,188,0.45) !important;
+            background: hsl(163, 74%, 58%) !important;
+            color: #ffffff !important;
+            min-height: 56px !important;
+            width: 56px !important;
+            font-weight: 700 !important;
+            font-size: 32px !important;
+            line-height: 1 !important;
+            padding: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stFormSubmitButton"] button:hover {
+            filter: brightness(0.98);
+            box-shadow: 0 8px 14px rgba(102,198,172,0.24) !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stButton"] button {
+            border-radius: 999px !important;
+            border: 2px solid hsl(163, 74%, 58%) !important;
+            background: #ffffff !important;
+            color: hsl(224, 64%, 10%) !important;
+            font-family: "DM Sans", sans-serif !important;
+            font-weight: 600 !important;
+            min-height: 48px !important;
+            font-size: 16px !important;
+            padding: 0 16px !important;
+            white-space: nowrap !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="element-container"]:has(.chat-messages-area) {
+            margin-bottom: 2px !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="element-container"]:has(div[data-testid="stButton"]) {
+            margin-top: 0 !important;
+            margin-bottom: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stForm"] div[data-testid="stTextInput"] {
+            margin-bottom: 0 !important;
         }
         @keyframes chat-loader-spin {
             from { transform: rotate(0deg); }
@@ -982,71 +1060,80 @@ def render_chatbot_interface(
             st.session_state.messages.append(
                 {
                     "role": "assistant",
-                    "content": "Ciao! Sono il tuo assistente UTM 😊 Ti aiuterò a creare il link tracciato e ti guiderò passo dopo passo nella compilazione dei parametri."
+                    "content": "Ciao! Sono l'assistente Smart UTM. Dimmi che campagna vuoi tracciare e ti guido passo passo."
                 }
             )
             st.session_state.chat_welcome_sent = True
         with st.container():
             st.markdown('<div class="chat-window-scope" style="display:none;"></div>', unsafe_allow_html=True)
-            
-            # HEADER
-            c_h1, c_h2 = st.columns([0.85, 0.15])
-            with c_h1:
-                st.markdown('<div style="font-weight:600; color:#1f2937; margin-top:5px; margin-left:5px;">🤖 WR Assistant</div>', unsafe_allow_html=True)
-            with c_h2:
-                if st.button("✕", key="close_window_btn"):
-                    st.session_state.chat_visible = False
-                    st.rerun()
-                    
-            st.markdown('<div style="height:1px; background:#e5e7eb; margin: 10px 0;"></div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="chat-header"><span class="chat-header-logo">W</span><span>Smart UTM Assistant</span></div>',
+                unsafe_allow_html=True,
+            )
 
-            # MESSAGES – render come HTML puro per evitare spazio nel layout Streamlit
+            # MESSAGES - render come HTML puro per evitare spazio nel layout Streamlit
             if not st.session_state.messages and not st.session_state.chat_is_responding:
-                img_tag = f'<img src="data:image/png;base64,{icon_b64}" style="width:60px;height:60px;margin-bottom:12px;opacity:0.8;border-radius:50%;"><br>' if icon_b64 else ''
-                msgs_html = f'<div class="chat-messages-area"><div style="text-align:center;padding:30px 16px;color:#6b7280;font-size:14px;">{img_tag}<b>Ciao!</b><br>Sono qui per aiutarti coi parametri UTM.</div></div>'
+                msgs_html = (
+                    '<div class="chat-messages-area">'
+                    '<div class="msg-row-bot"><span class="bot-avatar">W</span><div class="msg-bubble msg-bot">'
+                    "Ciao! Sono l'assistente Smart UTM. Dimmi che campagna vuoi tracciare e ti guido passo passo."
+                    "</div></div></div>"
+                )
             else:
                 rows = []
                 if st.session_state.chat_is_responding:
                     rows.append(
-                        '<div style="display:flex;justify-content:flex-start;margin-bottom:6px;">'
+                        '<div class="msg-row-bot"><span class="bot-avatar">W</span>'
                         '<div class="msg-bubble msg-bot msg-loading"><span class="chat-loader"></span>'
-                        'WR Assistant sta rispondendo...</div></div>'
+                        'Smart UTM Assistant sta rispondendo...</div></div>'
                     )
 
-                for msg in reversed(st.session_state.messages):
+                for msg in st.session_state.messages:
                     content = msg["content"].replace("\n", "<br>")
                     if msg["role"] == "user":
-                        rows.append(f'<div style="display:flex;justify-content:flex-end;margin-bottom:6px;"><div class="msg-bubble msg-user">{content}</div></div>')
+                        rows.append(f'<div class="msg-row-user"><div class="msg-bubble msg-user">{content}</div></div>')
                     else:
-                        rows.append(f'<div style="display:flex;justify-content:flex-start;margin-bottom:6px;"><div class="msg-bubble msg-bot">{content}</div></div>')
+                        rows.append(f'<div class="msg-row-bot"><span class="bot-avatar">W</span><div class="msg-bubble msg-bot">{content}</div></div>')
 
                 msgs_html = '<div class="chat-messages-area">' + ''.join(rows) + '</div>'
             st.markdown(msgs_html, unsafe_allow_html=True)
 
+            if not st.session_state.chat_is_responding:
+                st.markdown('<div style="height:2px;"></div>', unsafe_allow_html=True)
+                qr1, qr2, qr3 = st.columns(3)
+                with qr1:
+                    if st.button("Crea UTM", key="quick_reply_create"):
+                        _queue_user_message("Crea UTM")
+                with qr2:
+                    if st.button("Cosa sono gli UTM?", key="quick_reply_what"):
+                        _queue_user_message("Cosa sono gli UTM?")
+                with qr3:
+                    if st.button("Best practice", key="quick_reply_best"):
+                        _queue_user_message("Best practice")
+
             # INPUT
             chat_locked = bool(st.session_state.chat_is_responding)
-            input_placeholder = "WR Assistant sta rispondendo..." if chat_locked else "Scrivi qui..."
+            input_placeholder = "Smart UTM Assistant sta rispondendo..." if chat_locked else "Scrivi un messaggio..."
 
             with st.form("chat_input_form", clear_on_submit=True):
-                user_text = st.text_input(
-                    "Messaggio",
-                    label_visibility="collapsed",
-                    placeholder=input_placeholder,
-                    disabled=chat_locked,
-                )
-                submitted = st.form_submit_button("Invia", use_container_width=True, disabled=chat_locked)
+                input_col, send_col = st.columns([0.82, 0.18], gap="small")
+                with input_col:
+                    user_text = st.text_input(
+                        "Messaggio",
+                        label_visibility="collapsed",
+                        placeholder=input_placeholder,
+                        disabled=chat_locked,
+                    )
+                with send_col:
+                    submitted = st.form_submit_button("→", use_container_width=True, disabled=chat_locked)
 
             if submitted and user_text and not chat_locked:
-                st.session_state.messages.append({"role": "user", "content": user_text})
-                st.session_state.pending_user_text = user_text
-                st.session_state.chat_is_responding = True
-                st.rerun()
-
+                _queue_user_message(user_text)
             if st.session_state.chat_is_responding and st.session_state.pending_user_text:
                 pending_text = st.session_state.pending_user_text
 
                 try:
-                    with st.spinner("WR Assistant sta rispondendo..."):
+                    with st.spinner("Smart UTM Assistant sta rispondendo..."):
                         api_key = st.session_state.get("gemini_api_key")
                         if not api_key:
                             st.session_state.messages.append(
@@ -1250,3 +1337,5 @@ def render_chatbot_interface(
                     st.session_state.pending_user_text = None
 
                 st.rerun()
+
+
