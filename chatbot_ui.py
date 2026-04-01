@@ -1,6 +1,9 @@
-import streamlit as st
+﻿import streamlit as st
+import streamlit.components.v1 as components
 import re
 import json
+import hashlib
+import html as html_lib
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
@@ -247,6 +250,7 @@ def clean_bot_response(text: str) -> str:
     # rimuove backticks
     text = text.replace("```json", "").replace("```", "")
     text = text.replace("`", "")
+    text = text.replace("**", "")
     # rimuove escape markdown superflui (es. social\_paid -> social_paid)
     text = text.replace("\\_", "_")
     text = text.replace("\\[", "[").replace("\\]", "]")
@@ -306,6 +310,141 @@ def clean_bot_response(text: str) -> str:
     return text
 
 
+def _extract_client_rule_constraints(client_rules_text: str) -> Tuple[List[str], List[str], Dict[str, List[str]]]:
+    allowed_sources: List[str] = []
+    allowed_mediums: List[str] = []
+    medium_source_map: Dict[str, List[str]] = {}
+
+    for raw_line in str(client_rules_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        source_match = re.search(r"utm_source consentiti \(esempi\):\s*(.+)$", line, flags=re.IGNORECASE)
+        if source_match:
+            allowed_sources = [_sanitize_utm_value(x) for x in source_match.group(1).split(",")]
+            allowed_sources = [x for x in allowed_sources if x]
+            continue
+
+        medium_match = re.search(r"utm_medium consentiti \(esempi\):\s*(.+)$", line, flags=re.IGNORECASE)
+        if medium_match:
+            allowed_mediums = [_sanitize_utm_value(x) for x in medium_match.group(1).split(",")]
+            allowed_mediums = [x for x in allowed_mediums if x]
+            continue
+
+        mapping_match = re.search(
+            r"mapping utm_source per utm_medium=([a-z0-9_-]+):\s*(.+)$",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if mapping_match:
+            medium = _sanitize_utm_value(mapping_match.group(1))
+            values = [_sanitize_utm_value(x) for x in mapping_match.group(2).split(",")]
+            values = [x for x in values if x]
+            if medium and values:
+                medium_source_map[medium] = values
+
+    return allowed_sources, allowed_mediums, medium_source_map
+
+
+def _enforce_client_rule_options(raw_text: str, context: dict, client_rules_text: str) -> str:
+    text = str(raw_text or "").strip()
+    if not text or not client_rules_text:
+        return text
+
+    if "http" in text and "utm_" in text:
+        return text
+
+    _allowed_sources, _allowed_mediums, medium_source_map = _extract_client_rule_constraints(client_rules_text)
+    if not medium_source_map:
+        return text
+
+    low = text.lower()
+    current_medium = _sanitize_utm_value(str(context.get("params", {}).get("utm_medium") or ""))
+    if not current_medium:
+        return text
+
+    allowed_for_medium = medium_source_map.get(current_medium) or []
+    if not allowed_for_medium:
+        return text
+
+    is_source_step = (
+        "utm_source" in low
+        or "origine del traffico" in low
+        or "passiamo a utm_source" in low
+    )
+    if not is_source_step:
+        return text
+
+    if len(allowed_for_medium) == 1:
+        only = allowed_for_medium[0]
+        return (
+            f"Ottimo. Ora passiamo a utm_source. Per utm_medium={current_medium}, "
+            f"la convenzione cliente prevede un solo valore coerente: {only}. "
+            f"Confermi di utilizzare utm_source={only}?"
+        )
+
+    allowed_csv = ", ".join(allowed_for_medium)
+    return (
+        f"Ottimo. Ora passiamo a utm_source. Per utm_medium={current_medium}, "
+        f"i valori coerenti previsti dalla convenzione cliente sono: {allowed_csv}. "
+        "Quale vuoi usare?"
+    )
+
+
+def _infer_optional_value_from_text(user_input: str) -> str:
+    plain = str(user_input or "").strip().lower()
+    if not plain:
+        return ""
+    tokens = re.findall(r"[a-zA-Z0-9àèéìòù_-]+", plain)
+    stopwords = {
+        "si", "sì", "no", "ok", "va", "bene", "usa", "usiamo", "metti", "mettere",
+        "lascia", "vuoto", "nessuno", "nessuna", "niente", "senza", "utm", "content",
+        "term", "cta", "keyword", "keywords", "target", "audience", "segmento",
+    }
+    kept = []
+    for token in tokens:
+        clean = _sanitize_utm_value(token)
+        if not clean or clean in stopwords or clean.isdigit():
+            continue
+        kept.append(clean)
+        if len(kept) >= 4:
+            break
+    return "-".join(kept)
+
+
+def _enforce_optional_followup(raw_text: str, context: dict) -> str:
+    text = str(raw_text or "").strip()
+    if not text:
+        return text
+
+    params = context.get("params", {})
+    if not params.get("utm_campaign"):
+        return text
+
+    optional_step = str(context.get("optional_step") or "")
+    low = text.lower()
+    already_mentions_optional = any(
+        key in low for key in ["utm_content", "utm_term", "cta", "keyword", "segmento", "audience"]
+    )
+    if already_mentions_optional:
+        return text
+
+    if optional_step == "content" and not params.get("utm_content"):
+        return (
+            "Perfetto. Prima del link finale vuoi valorizzare anche utm_content? "
+            "Per esempio possiamo inserire il nome della CTA, del bottone, del banner o del visual principale."
+        )
+
+    if optional_step == "term" and not params.get("utm_term"):
+        return (
+            "Perfetto. Vuoi aggiungere anche utm_term? "
+            "Se ti serve, possiamo usarlo per keyword, audience, segmento o dettaglio dell'offerta; altrimenti dimmi pure di lasciarlo vuoto."
+        )
+
+    return text
+
+
 # -------------------------
 # Multi-turn context tracking
 # -------------------------
@@ -315,7 +454,6 @@ def _update_context_from_response(raw_response: str, user_input: str, context: d
     Updates context in place. Never raises.
     """
     try:
-        # Reset detection
         reset_phrases = ["ricominciamo", "nuovo link", "reset", "da capo", "riparti"]
         if any(phrase in (user_input or "").lower() for phrase in reset_phrases):
             context["current_step"] = 0
@@ -323,35 +461,47 @@ def _update_context_from_response(raw_response: str, user_input: str, context: d
                 context["params"][k] = None
             context["ga4_property_id"] = None
             context["tool_cache"] = {}
+            context["optional_step"] = "content"
             return
 
-        # Extract URL from user input
-        url = _extract_first_url(user_input)
-        if url and not context["params"]["destination_url"]:
-            context["params"]["destination_url"] = _normalize_destination_url(url)
+        plain_input = str(user_input or "").strip()
+        input_lower = plain_input.lower()
+        params = context["params"]
 
-        # Parse JSON blocks from raw response for utm_* keys
+        url = _extract_first_url(user_input)
+        if url and not params["destination_url"]:
+            params["destination_url"] = _normalize_destination_url(url)
+
+        has_explicit_utm = any(tag in input_lower for tag in ["utm_", "utm source", "utm medium", "utm campaign"])
+        if plain_input and len(plain_input.split()) >= 5 and not has_explicit_utm and not params.get("campaign_brief"):
+            params["campaign_brief"] = plain_input
+
         json_data = _extract_json_block_if_any(raw_response or "")
         if json_data:
             for key in ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"]:
                 val = json_data.get(key)
                 if val and str(val).lower() not in ("null", "none", ""):
-                    context["params"][key] = str(val)
+                    params[key] = str(val)
             for url_key in ["url", "URL", "destination_url"]:
                 val = json_data.get(url_key)
                 if val and str(val).strip():
-                    context["params"]["destination_url"] = _normalize_destination_url(str(val))
+                    params["destination_url"] = _normalize_destination_url(str(val))
 
-        # Infer traffic_type from user input
-        if not context["params"]["traffic_type"]:
-            for traffic in ["social", "newsletter", "email", "paid search", "display", "referral"]:
-                if traffic in (user_input or "").lower():
-                    context["params"]["traffic_type"] = traffic
+        if not params["traffic_type"]:
+            traffic_aliases = {
+                "newsletter": ["newsletter", "dem", "email marketing", "mailing", "invio email"],
+                "paid search": ["paid search", "google ads", "search ads", "sem", "ppc", "campagna search"],
+                "display": ["display", "banner", "programmatic", "gdn", "retargeting display"],
+                "social": ["social", "meta ads", "facebook ads", "instagram ads", "linkedin ads", "tiktok ads"],
+                "referral": ["referral", "partnership", "affiliato", "affiliate", "sito partner"],
+            }
+            for traffic_name, aliases in traffic_aliases.items():
+                if any(alias in input_lower for alias in aliases):
+                    params["traffic_type"] = traffic_name
                     break
 
-        # If traffic_type is known, prefill GA4 channel to avoid redundant questions
-        if context["params"]["traffic_type"] and not context["params"]["ga4_channel"]:
-            tt = context["params"]["traffic_type"].lower()
+        if params["traffic_type"] and not params["ga4_channel"]:
+            tt = params["traffic_type"].lower()
             traffic_to_channel = {
                 "social": "Paid Social",
                 "newsletter": "Email",
@@ -361,10 +511,9 @@ def _update_context_from_response(raw_response: str, user_input: str, context: d
                 "referral": "Referral",
             }
             if tt in traffic_to_channel:
-                context["params"]["ga4_channel"] = traffic_to_channel[tt]
+                params["ga4_channel"] = traffic_to_channel[tt]
 
-        # Infer ga4_channel from user input (fallback only if still missing)
-        if not context["params"]["ga4_channel"]:
+        if not params["ga4_channel"]:
             channel_keywords = {
                 "organic social": "Organic Social",
                 "paid social": "Paid Social",
@@ -374,51 +523,169 @@ def _update_context_from_response(raw_response: str, user_input: str, context: d
                 "referral": "Referral",
             }
             for kw, channel in channel_keywords.items():
-                if kw in (user_input or "").lower():
-                    context["params"]["ga4_channel"] = channel
+                if kw in input_lower:
+                    params["ga4_channel"] = channel
                     break
 
-        # Extract utm values from user input using common patterns
-        input_lower = (user_input or "").lower()
+        if not params.get("campaign_country_language"):
+            m_country_lang = re.search(r"\b([a-z]{2})(?:[-_ ]([a-z]{2}))\b", input_lower)
+            if m_country_lang:
+                params["campaign_country_language"] = f"{m_country_lang.group(1)}-{m_country_lang.group(2)}"
+            else:
+                m_country = re.search(r"\b(it|fr|de|es|uk|us|pt|nl|ch|at|be|pl)\b", input_lower)
+                if m_country:
+                    params["campaign_country_language"] = m_country.group(1)
+
+        if not params.get("campaign_type"):
+            type_aliases = {
+                "promo": ["promo", "promozione", "promotional", "sale", "sconto", "saldi", "offerta", "lancio"],
+                "ed": ["editoriale", "editorial", "blog", "contenuto", "content"],
+                "tr": ["transactional", "transazionale", "conversion", "retargeting", "remarketing", "acquisto"],
+                "awr": ["awareness", "brand", "notorieta", "visibilita", "consideration"],
+            }
+            for type_key, aliases in type_aliases.items():
+                if any(alias in input_lower for alias in aliases):
+                    params["campaign_type"] = type_key
+                    break
+
+        if not params.get("campaign_date"):
+            date_matches = re.findall(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{2}[./-]\d{2}[./-]\d{2,4}\b|\b\d{8}\b", plain_input)
+            for token in date_matches:
+                fixed = _try_fix_date_to_ddmmyyyy(token) or (token if re.fullmatch(r"\d{8}", token) else None)
+                if fixed:
+                    params["campaign_date"] = fixed
+                    break
+
+        if not params.get("campaign_cta"):
+            m_cta = re.search(r"\b(cta|image|banner|video|btn|button|hero)\b", input_lower)
+            if m_cta:
+                params["campaign_cta"] = _sanitize_utm_value(m_cta.group(1))
+
+        if not params.get("campaign_name") and plain_input and not has_explicit_utm:
+            stopwords = {
+                "la", "il", "lo", "gli", "le", "un", "una", "dei", "delle", "per", "con", "del", "della", "di", "da",
+                "su", "tra", "fra", "campaign", "campagna", "utm", "link", "newsletter", "social", "ads", "google",
+                "meta", "facebook", "instagram", "linkedin", "tiktok", "email", "dem"
+            }
+            words = re.findall(r"[a-zA-Z0-9àèéìòù_-]+", input_lower)
+            kept = []
+            for w in words:
+                token = _sanitize_utm_value(w)
+                if not token or token.isdigit() or token in stopwords or len(token) < 3:
+                    continue
+                kept.append(token)
+                if len(kept) >= 3:
+                    break
+            if kept:
+                params["campaign_name"] = "-".join(kept)
+
+        if not params.get("utm_campaign"):
+            country_lang = params.get("campaign_country_language")
+            campaign_type = params.get("campaign_type")
+            campaign_name = params.get("campaign_name")
+            campaign_date = params.get("campaign_date")
+            campaign_cta = params.get("campaign_cta")
+            if country_lang and campaign_type and campaign_name and campaign_date:
+                parts = [country_lang, campaign_type, campaign_name, campaign_date]
+                if campaign_cta:
+                    parts.append(campaign_cta)
+                params["utm_campaign"] = "_".join(parts)
+
         utm_patterns = {
-            "utm_medium": r"(?:utm_?medium|medium)\s*[:=è]\s*([a-z0-9_-]+)",
-            "utm_source": r"(?:utm_?source|source)\s*[:=è]\s*([a-z0-9_-]+)",
-            "utm_campaign": r"(?:utm_?campaign|campaign)\s*[:=è]\s*([a-z0-9_-]+)",
-            "utm_content": r"(?:utm_?content|content)\s*[:=è]\s*([a-z0-9_-]+)",
-            "utm_term": r"(?:utm_?term|term)\s*[:=è]\s*([a-z0-9_-]+)",
+            "utm_medium": r"(?:utm_?medium|medium)\s*[:=]\s*([a-z0-9_-]+)",
+            "utm_source": r"(?:utm_?source|source)\s*[:=]\s*([a-z0-9_-]+)",
+            "utm_campaign": r"(?:utm_?campaign|campaign)\s*[:=]\s*([a-z0-9_-]+)",
+            "utm_content": r"(?:utm_?content|content)\s*[:=]\s*([a-z0-9_-]+)",
+            "utm_term": r"(?:utm_?term|term)\s*[:=]\s*([a-z0-9_-]+)",
         }
         for param, pattern in utm_patterns.items():
-            if not context["params"][param]:
+            if not params.get(param):
                 m = re.search(pattern, input_lower)
                 if m:
-                    context["params"][param] = m.group(1)
+                    params[param] = m.group(1)
 
-        # Advance current_step based on filled params (never goes backward)
+        optional_step = str(context.get("optional_step") or "content")
+        decline_optional = any(
+            phrase in input_lower for phrase in [
+                "nessuno", "nessuna", "niente", "no", "no grazie", "lascia vuoto",
+                "vuoto", "non serve", "skip"
+            ]
+        )
+        if params.get("utm_campaign") and optional_step == "content" and not params.get("utm_content"):
+            if decline_optional:
+                context["optional_step"] = "term"
+            else:
+                inferred_content = _infer_optional_value_from_text(plain_input)
+                if inferred_content:
+                    params["utm_content"] = inferred_content
+                    context["optional_step"] = "term"
+
+        optional_step = str(context.get("optional_step") or "content")
+        if params.get("utm_campaign") and optional_step == "term" and not params.get("utm_term"):
+            if decline_optional:
+                context["optional_step"] = "done"
+            else:
+                inferred_term = _infer_optional_value_from_text(plain_input)
+                if inferred_term:
+                    params["utm_term"] = inferred_term
+                    context["optional_step"] = "done"
+
         step_map = [
             "destination_url",   # step 1
-            "traffic_type",      # step 2
-            "ga4_channel",       # step 3
+            "campaign_brief",    # step 2
+            "traffic_type",      # step 3
             "utm_medium",        # step 4
             "utm_source",        # step 5
             "utm_campaign",      # step 6
         ]
         filled = 0
         for param_name in step_map:
-            if context["params"].get(param_name):
+            if params.get(param_name):
                 filled += 1
             else:
                 break
         new_step = max(context["current_step"], filled)
         if filled >= 6:
-            has_optional = context["params"].get("utm_content") or context["params"].get("utm_term")
-            if has_optional:
+            optional_step = str(context.get("optional_step") or "content")
+            if optional_step == "done":
                 new_step = max(new_step, 7)
+            else:
+                new_step = max(new_step, 6)
         context["current_step"] = new_step
 
     except Exception:
-        pass  # Never break the chat
+        pass
 
 
+def _enforce_guided_single_question(raw_text: str, context: dict) -> str:
+    """Evita risposte che chiedono tutti i token utm_campaign in blocco."""
+    text = str(raw_text or "").strip()
+    if not text:
+        return text
+
+    low = text.lower()
+    asks_all_tokens = (
+        ("country-lingua" in low or "country/lingua" in low or "country lingua" in low)
+        and ("campaigntype" in low or "campaign type" in low)
+        and ("campaignname" in low or "campaign name" in low)
+        and ("data" in low or "date" in low)
+    )
+    looks_like_list = ("* country" in low or "* campaigntype" in low or "1) country" in low)
+
+    if asks_all_tokens or looks_like_list:
+        if not context["params"].get("campaign_brief"):
+            return (
+                "Perfetto, andiamo passo passo. "
+                "Mi descrivi in 1-2 frasi la campagna (obiettivo, piattaforma e periodo)? "
+                "Da questa descrizione ricavo io i parametri."
+            )
+        if not context["params"].get("campaign_name"):
+            return "Ottimo. Qual e il nome interno della campagna che vuoi tracciare?"
+        if not context["params"].get("campaign_date"):
+            return "Perfetto. Qual e la data di riferimento della campagna? (accetto anche 2026-07-01)"
+        return "Ricevuto. Ti propongo ora una bozza di utm_campaign e ti chiedo solo conferma finale."
+
+    return text
 def _build_system_instruction(
     context: dict,
     current_date: str,
@@ -436,16 +703,16 @@ def _build_system_instruction(
 
     step_descriptions = {
         0: "Chiedi l'URL di destinazione (step 1)",
-        1: "Chiedi il contesto traffico SOLO se non già noto (social/newsletter/paid search/display/altro)",
-        2: "Se il contesto è già chiaro, NON chiedere il canale: usa quello coerente",
-        3: "Proponi opzioni per utm_medium coerenti con quanto già detto",
-        4: "Proponi opzioni per utm_source coerenti con quanto già detto",
-        5: "Chiedi utm_campaign nel formato country-lingua_type_name_date",
+        1: "Chiedi una breve descrizione della campagna (1-2 frasi) e ricava automaticamente il più possibile",
+        2: "Fai domande diagnostiche sul contesto traffico SOLO se non già noto",
+        3: "Raccomanda utm_medium coerente col contesto e con le regole cliente",
+        4: "Raccomanda utm_source coerente col contesto e con le regole cliente",
+        5: "Costruisci utm_campaign chiedendo un solo token mancante per volta",
         6: "Chiedi parametri opzionali utm_content e utm_term",
         7: "Genera il link finale completo",
     }
     next_step = min(context["current_step"], 7)
-    next_desc = step_descriptions.get(next_step, "Genera il link finale completo (step 8)")
+    next_desc = step_descriptions.get(next_step, "Genera il link finale completo (step finale)")
 
     ga4_val = context.get("ga4_property_id") or "non ancora selezionata"
     client_rules_block = ""
@@ -475,8 +742,8 @@ Oggi è il {current_date}.
 
 OBIETTIVO
 Guidare l'utente a creare un URL tracciato che:
-- rispetti le regole UTM definite
-- sia coerente con lo storico GA4 (quando utile)
+- rispetti PRIMA DI TUTTO la naming convention del file UTM cliente configurato
+- usi GA4 solo come controllo di coerenza/adozione, mai come fonte primaria di naming
 - finisca nel canale corretto secondo il channel grouping PRIMARIO della property
 {client_rules_block}
 {property_preselection_block}
@@ -488,6 +755,31 @@ REGOLE VISIVE
    NON stampare JSON, NON usare parentesi graffe.
 4) Rispondi esclusivamente in italiano corretto.
 5) Non usare parole o caratteri di altre lingue/scritture.
+
+REGOLE DI GUIDA CONSULENZIALE (OBBLIGATORIE)
+- L'utente è inesperto: non dare per scontata la conoscenza di canali o UTM.
+- NON chiedere mai: "in quale canale vuoi confluire?" o varianti simili.
+- Devi dedurre il canale più corretto dalle informazioni raccolte (obiettivo, piattaforma, paid vs organic, formato annuncio, pubblico).
+- Se mancano dati, fai domande diagnostiche specifiche e concrete (es. "La campagna parte da newsletter inviata dal CRM o da piattaforma adv?").
+- Dopo ogni risposta utile, proponi tu la coppia consigliata canale + utm_medium + utm_source e chiedi solo conferma.
+- Se GA4 è disponibile, usalo solo per verificare se i valori proposti sono già usati e in quale canale confluiscono; NON usarlo per decidere il naming.
+- NON chiedere mai liste lunghe di campi (country, lingua, campaignType, campaignName, data, CTA) nello stesso messaggio.
+- Prima chiedi sempre una descrizione breve della campagna e ricava automaticamente i campi possibili.
+- Per utm_campaign chiedi un solo token mancante alla volta.
+- Se le REGOLE CLIENTE elencano valori ammessi per utm_medium o utm_source, proponi solo valori presenti in quell'elenco.
+- Non proporre mai alternative fuori elenco cliente solo perche semanticamente plausibili.
+- Se per il caso corrente il file cliente rende disponibile un solo utm_medium coerente, proponi solo quello e chiedi conferma, senza alternative.
+- Anche se utm_content e utm_term sono opzionali, devi sempre dedicarvi un passaggio prima del link finale.
+- Per utm_content fai una domanda concreta, per esempio sul nome della CTA, del bottone, del banner, della hero o del visual principale.
+- Per utm_term fai una domanda concreta su keyword, audience, segmento, promo, categoria o dettaglio utile, oppure chiedi se lasciarlo vuoto.
+
+GERARCHIA DECISIONALE (VINCOLANTE)
+1) REGOLE CLIENTE da file UTM configurato (fonte primaria e prioritaria).
+2) Mapping generico interno SOLO se il file cliente non copre esplicitamente quel caso.
+3) GA4 solo come check ex-post (coerenza canale / presenza storica), mai per scegliere i valori.
+4) Se GA4 mostra valori storici in conflitto con le regole cliente, scarta i valori GA4 e mantieni le regole cliente.
+5) Non proporre mai utm_source/utm_medium non previsti dalla convenzione cliente quando la convenzione li definisce.
+6) Se le regole cliente contengono esempi o liste di valori consentiti, gli esempi generici non possono ampliare quell'insieme.
 
 REGOLE ANTI-RIPETIZIONE
 - Non ripetere i valori dell'utente in modo ridondante.
@@ -507,7 +799,7 @@ Naming convention:
 - Trattini dentro i token per separare parole, underscore tra token
 - Non inventare naming se esiste una convenzione storica.
 
-MAPPING utm_medium / utm_source (DA PROPORRE IN BASE AL traffic_type)
+MAPPING utm_medium / utm_source (USARE SOLO COME FALLBACK SE LE REGOLE CLIENTE NON COPRONO IL CASO)
 - Organic: medium=organic, source=google|bing|yahoo|yandex
 - Referral: medium=referral, source=[website domain]
 - Direct: medium=(none), source=(direct)
@@ -516,23 +808,27 @@ MAPPING utm_medium / utm_source (DA PROPORRE IN BASE AL traffic_type)
 - Display: medium=cpm, source=reservation|display|programmatic_video
 - Video: medium=cpv, source=youtube
 - Programmatic: medium=cpm, source=rcs|mediamond|rai|ilsole24ore
-- Email/Newsletter: medium=email oppure mailing_campaign, source=newsletter|email|crm
+- Email/Newsletter: medium=email, source=newsletter|email|crm
 - Social organic: medium=social_org, source=facebook|instagram|linkedin|...(nome social)
 - Social paid: medium=social_paid, source=facebook|instagram|linkedin|...(nome social)
 - App traffic: medium=(chiedere all'utente), source=app
 - Offline: medium=offline, source=brochure|qr_code|sms
 
- REGOLE utm_campaign (STRUTTURA OBBLIGATORIA)
-Formato: country-lingua_campaignType_campaignName_data[_CTA]
-Token separati da underscore _, parole dentro un token separate da trattino -.
-Token richiesti:
-1) country-lingua: indica la provenienza/lingua della campagna. È sufficiente inserire UNO dei due: solo il paese (es. it, ch, es) OPPURE paese-lingua (es. it-it, ch-de, es-es). Non è obbligatorio fornire entrambi. Esempi validi: "it", "ch", "it-it", "ch-de".
-2) campaignType: preferibilmente promo (promotional), ed (editorial), tr (transactional), awr (awareness); sono consentiti anche nuovi tipi personalizzati
-3) campaignName: nome interno della campagna
-4) data: data invio/riferimento temporale (formato GGMMAAAA, senza separatori)
-Token opzionale:
-5) CTA: es. cta, image, banner
-Golden rules: struttura obbligatoria, token mandatory presenti, _ tra token, - dentro token, no spazi/% /&.
+ REGOLE utm_campaign
+ - Se le REGOLE CLIENTE definiscono una struttura esplicita per utm_campaign, usa ESATTAMENTE quella struttura.
+ - Se le REGOLE CLIENTE mostrano esempi di utm_campaign, trattali come riferimento prioritario per ordine, numero e significato dei token.
+ - Non trasformare mai un token iniziale previsto dal cliente (es. brandcountry) in country o country-lingua.
+ - Il formato seguente vale SOLO come fallback se il file cliente non definisce una struttura esplicita.
+ Formato fallback: country-lingua_campaignType_campaignName_data[_CTA]
+ Token separati da underscore _, parole dentro un token separate da trattino -.
+ Token fallback richiesti:
+ 1) country-lingua: indica la provenienza/lingua della campagna. È sufficiente inserire UNO dei due: solo il paese (es. it, ch, es) OPPURE paese-lingua (es. it-it, ch-de, es-es). Non è obbligatorio fornire entrambi. Esempi validi: "it", "ch", "it-it", "ch-de".
+ 2) campaignType: preferibilmente promo (promotional), ed (editorial), tr (transactional), awr (awareness); sono consentiti anche nuovi tipi personalizzati
+ 3) campaignName: nome interno della campagna
+ 4) data: data invio/riferimento temporale (formato GGMMAAAA, senza separatori)
+ Token fallback opzionale:
+ 5) CTA: es. cta, image, banner
+ Golden rules: struttura obbligatoria, token mandatory presenti, _ tra token, - dentro token, no spazi/% /&.
 
 REGOLE utm_term
 - Utile per keyword e caratteristiche specifiche
@@ -554,11 +850,12 @@ REGOLE CANALI GA4
 - Usa dimensione "sessionPrimaryChannelGroup" (fallback: "sessionDefaultChannelGroup").
 
 REGOLE GA4: QUANDO USARLO
-- Non usare GA4 di default.
+- Non usare GA4 per scegliere il naming.
 - Usalo quando:
   a) l'utente chiede verifica/storico (es. "ultimo anno")
-  b) medium/source rischiano di mandare nel canale sbagliato
-  c) servono opzioni coerenti con lo storico
+  b) vuoi verificare se la proposta conforme al file cliente è già stata usata
+  c) vuoi controllare in quale canale GA4 finirebbe la proposta
+- Se in GA4 esistono source/medium "sporchi" o errati, NON riutilizzarli.
 
 GESTIONE ERRORI GA4
 - Se un tool GA4 restituisce un dict con chiave "error", riporta all'utente il messaggio esatto: es. "Errore GA4: <valore di error>".
@@ -574,24 +871,42 @@ PROPERTY GA4: AUTO-SELEZIONE SENZA CONFERMA
 
 FLOW (UNA DOMANDA PER STEP, ADATTIVO)
 STEP 1: URL destinazione (normalizza a https://www.)
-STEP 2: Contesto traffico (social, newsletter, paid search, display, altro) SOLO se non già noto
-STEP 3: Canale GA4 target SOLO se indispensabile e non deducibile dal contesto
-STEP 4: utm_medium
-- Proponi 2-4 opzioni coerenti col traffic_type (vedi MAPPING sopra)
-- Se possibile, verifica con GA4: dimensions ["sessionPrimaryChannelGroup","sessionMedium"], metric ["sessions"]
-STEP 5: utm_source
-- Proponi 2-4 opzioni coerenti (vedi MAPPING sopra)
-- Se possibile, verifica con GA4: dimensions ["sessionPrimaryChannelGroup","sessionSource"], metric ["sessions"]
+STEP 2: Richiedi una breve descrizione libera della campagna (1-2 frasi)
+- Da quella descrizione inferisci automaticamente: traffic_type, canale, country-lingua, campaignType, campaignName, data (se presenti)
+STEP 3: Diagnosi del contesto traffico SOLO se non già noto
+- Domande specifiche: piattaforma, paid vs organic, tipo campagna (newsletter/social/search/display/altro)
+STEP 4: utm_medium (raccomandato dal bot, non chiesto in modo generico)
+- Proponi 1 opzione consigliata + 1 alternativa coerente col contesto
+- Le opzioni devono rispettare prima il file UTM cliente; usa mapping generico solo come fallback
+- Se il file cliente prevede un solo medium coerente con il caso, proponi solo quel medium e nessuna alternativa
+- Se fai check GA4, usalo solo per segnalare adozione/coerenza canale, non per scegliere i valori
+STEP 5: utm_source (raccomandato dal bot)
+- Proponi 1 opzione consigliata + 1 alternativa coerente col contesto
+- Le opzioni devono rispettare prima il file UTM cliente; usa mapping generico solo come fallback
+- Se il file cliente prevede una sola source coerente con il caso, proponi solo quella e nessuna alternativa
+- Se fai check GA4, usalo solo per segnalare adozione/coerenza canale, non per scegliere i valori
 STEP 6: utm_campaign
-- Costruisci chiedendo solo i token mancanti:
-  1) country-lingua, 2) campaignType (suggerisci promo/ed/tr/awr ma accetta anche nuovi tipi personalizzati), 3) campaignName, 4) data, 5) CTA (opzionale)
-STEP 7: opzionali (utm_content, poi utm_term)
-STEP 8: output finale SOLO LINK (con query correttamente formattata e senza caratteri speciali nei valori UTM).
+- NON chiedere mai tutti i token insieme.
+- Se le REGOLE CLIENTE definiscono i token o il loro ordine, segui quell'ordine e quella semantica.
+- Chiedi un solo token mancante per volta.
+- Solo se il file cliente non definisce i token, usa questo fallback:
+  1) country-lingua, 2) campaignType, 3) campaignName, 4) data, 5) CTA (opzionale)
+- Se i token sono già deducibili dalla descrizione, proponi direttamente una bozza e chiedi solo conferma.
+STEP 7: utm_content
+- Anche se opzionale, chiedilo sempre prima del link finale.
+- Fai una domanda concreta sul contenuto creativo, per esempio CTA, bottone, banner, hero, visual o placement.
+- Se l'utente non vuole valorizzarlo, accetta una risposta come "lascialo vuoto" e passa oltre.
+STEP 8: utm_term
+- Anche se opzionale, chiedilo sempre dopo utm_content e prima del link finale.
+- Fai una domanda concreta su keyword, audience, segmento, promo, categoria o dettaglio utile.
+- Se l'utente non vuole valorizzarlo, accetta una risposta come "lascialo vuoto" e passa oltre.
+STEP 9: output finale SOLO LINK (con query correttamente formattata e senza caratteri speciali nei valori UTM).
 
 STATO ATTUALE DELLA CONVERSAZIONE
-- Step attuale: {next_step} di 8
+- Step attuale: {next_step} di 9
 - Parametri raccolti:
   - URL destinazione: {_val("destination_url")}
+  - Descrizione campagna: {_val("campaign_brief")}
   - Tipo di traffico: {_val("traffic_type")}
   - Canale GA4 target: {_val("ga4_channel")}
   - utm_medium: {_val("utm_medium")}
@@ -606,6 +921,9 @@ ISTRUZIONI BASATE SULLO STATO
 - Il prossimo step da completare è: {next_desc}
 - Se l'utente fornisce più parametri in un solo messaggio, raccoglili tutti e avanza.
 - Se l'utente dice "campagna social", NON chiedere se è email/display: proponi direttamente opzioni social coerenti.
+- Se l'utente dice "newsletter/email/DEM", proponi direttamente canale Email con medium/source coerenti e chiedi solo conferma.
+- Prima di proporre source/medium, controlla sempre le REGOLE CLIENTE e usa esattamente quei valori quando presenti.
+- Se nelle REGOLE CLIENTE per email compare solo utm_medium=email, non nominare mailing_campaign.
 """
     return base
 
@@ -695,8 +1013,10 @@ def render_chatbot_interface(
     if "utm_context" not in st.session_state:
         st.session_state.utm_context = {
             "current_step": 0,
+            "optional_step": "content",
             "params": {
                 "destination_url": None,
+                "campaign_brief": None,
                 "traffic_type": None,
                 "ga4_channel": None,
                 "utm_medium": None,
@@ -704,10 +1024,60 @@ def render_chatbot_interface(
                 "utm_campaign": None,
                 "utm_content": None,
                 "utm_term": None,
+                "campaign_country_language": None,
+                "campaign_type": None,
+                "campaign_name": None,
+                "campaign_date": None,
+                "campaign_cta": None,
             },
             "ga4_property_id": None,
             "tool_cache": {},
         }
+    # Backward compatibility: allinea eventuali sessioni vecchie ai nuovi campi.
+    st.session_state.utm_context.setdefault("current_step", 0)
+    st.session_state.utm_context.setdefault("optional_step", "content")
+    st.session_state.utm_context.setdefault("ga4_property_id", None)
+    st.session_state.utm_context.setdefault("tool_cache", {})
+    st.session_state.utm_context.setdefault("params", {})
+    for _k in [
+        "destination_url", "campaign_brief", "traffic_type", "ga4_channel",
+        "utm_medium", "utm_source", "utm_campaign", "utm_content", "utm_term",
+        "campaign_country_language", "campaign_type", "campaign_name", "campaign_date", "campaign_cta",
+    ]:
+        st.session_state.utm_context["params"].setdefault(_k, None)
+    current_profile_signature = hashlib.sha256(
+        f"{client_rules_text}|{preferred_property_id}|{preferred_property_name}".encode("utf-8")
+    ).hexdigest()
+    prev_profile_signature = str(st.session_state.get("chat_profile_signature", "")).strip()
+    if prev_profile_signature and prev_profile_signature != current_profile_signature:
+        st.session_state.messages = []
+        st.session_state.chat_welcome_sent = False
+        st.session_state.chat_is_responding = False
+        st.session_state.pending_user_text = None
+        st.session_state.utm_context = {
+            "current_step": 0,
+            "optional_step": "content",
+            "params": {
+                "destination_url": None,
+                "campaign_brief": None,
+                "traffic_type": None,
+                "ga4_channel": None,
+                "utm_medium": None,
+                "utm_source": None,
+                "utm_campaign": None,
+                "utm_content": None,
+                "utm_term": None,
+                "campaign_country_language": None,
+                "campaign_type": None,
+                "campaign_name": None,
+                "campaign_date": None,
+                "campaign_cta": None,
+            },
+            "ga4_property_id": None,
+            "tool_cache": {},
+        }
+        st.session_state.chat_sync_notice = "Chat riallineata automaticamente all'ultima configurazione UTM del cliente."
+    st.session_state.chat_profile_signature = current_profile_signature
     preferred_pid_ctx = str(preferred_property_id or "").replace("properties/", "").strip()
     if preferred_pid_ctx:
         st.session_state.utm_context["ga4_property_id"] = preferred_pid_ctx
@@ -746,34 +1116,34 @@ def render_chatbot_interface(
         
         div[data-testid="stColumn"]:has(div.fab-unique-marker) button {{
             pointer-events: auto;
-            width: 64px !important;
-            height: 64px !important;
+            width: 56px !important;
+            height: 56px !important;
             border-radius: 50% !important;
-            border: 1px solid rgba(102, 198, 172, 0.45) !important;
-            box-shadow: 0 10px 22px rgba(8,14,28,0.45) !important;
+            border: 2px solid #5cb99e !important;
+            box-shadow: 0 6px 24px rgba(26, 35, 50, 0.25) !important;
             transition: transform 0.2s, box-shadow 0.2s !important;
-            background: #141d2d !important;
+            background: #1a2332 !important;
             display: block !important;
             margin: 0 !important;
             color: transparent !important;
         }}
         
         div[data-testid="stColumn"]:has(div.fab-unique-marker) button:hover {{
-            transform: scale(1.05);
-            box-shadow: 0 14px 28px rgba(8,14,28,0.58), 0 0 0 1px rgba(102,198,172,0.45) !important;
+            transform: scale(1.08);
+            box-shadow: 0 8px 32px rgba(92, 185, 158, 0.3) !important;
         }}
         
         div[data-testid="stColumn"]:has(div.fab-unique-marker) button p {{
             display: none !important;
         }}
         div[data-testid="stColumn"]:has(div.fab-unique-marker) button::after {{
-            content: "💬";
-            font-size: 24px;
+            content: "\\1F4AC";
+            font-size: 20px;
             display: flex;
             align-items: center;
             justify-content: center;
             height: 100%;
-            color: #66c6ac;
+            color: #5cb99e;
         }}
         
         /* Nasconde il marker stesso */
@@ -783,6 +1153,17 @@ def render_chatbot_interface(
     """
     # 2. STYLE PER LA WINDOW
     window_css = """
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Manrope:wght@500;600;700&display=swap');
+
+        :root {
+            --chat-ink: #142132;
+            --chat-muted: #4f637b;
+            --chat-line: #d2deeb;
+            --chat-aqua: #67cdb7;
+            --chat-aqua-strong: #49b49b;
+            --chat-panel: #f7fbff;
+        }
+
         /* ------------------------------------------------
          * CHAT WINDOW: fixed overlay, non disturba il layout
          * Il selector prende il vertical block piu' interno
@@ -792,20 +1173,23 @@ def render_chatbot_interface(
             position: fixed;
             bottom: 110px;
             right: 30px;
-            width: 560px !important;
+            width: 604px !important;
             max-width: 90vw;
-            height: 640px !important;
-            max-height: 80vh;
-            background-color: hsl(210, 20%, 98%);
-            border-radius: 12px;
-            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.24);
+            height: auto !important;
+            max-height: 85vh;
+            background:
+                radial-gradient(680px 200px at -12% -12%, rgba(103, 205, 183, 0.22), transparent 50%),
+                linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
+            border-radius: 22px;
+            box-shadow: 0 30px 95px rgba(15, 30, 49, 0.24), 0 8px 24px rgba(0, 0, 0, 0.1);
             z-index: 999998;
-            border: 1px solid hsl(210, 18%, 90%);
+            border: 1px solid var(--chat-line);
             overflow: hidden;
             display: flex;
             flex-direction: column;
             padding: 0 !important;
             gap: 0 !important;
+            animation: chat-window-rise .22s ease-out;
         }
 
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
@@ -821,16 +1205,23 @@ def render_chatbot_interface(
         /* Scroll storico messaggi in area dedicata */
         .chat-messages-area {
             height: auto;
-            max-height: 320px;
+            max-height: 390px;
             min-height: 0;
             overflow-y: auto;
-            padding: 24px 18px 4px 18px;
+            scroll-behavior: smooth;
+            padding: 22px 18px 18px 18px;
             display: flex;
             flex-direction: column;
-            gap: 12px;
-            background: hsl(210, 20%, 98%);
+            gap: 11px;
+            background:
+                radial-gradient(circle at 100% 0%, rgba(103, 205, 183, 0.18), rgba(103, 205, 183, 0) 44%),
+                linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
             flex: 0 0 auto;
             overflow-anchor: none;
+        }
+        .chat-messages-area.chat-messages-fresh {
+            min-height: 250px;
+            padding-bottom: 70px;
         }
 
         /* Input area dentro la window */
@@ -840,10 +1231,31 @@ def render_chatbot_interface(
             margin-bottom: 0 !important;
         }
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stVerticalBlock"]:has(.chat-quick-panel-marker) {
+            margin: 8px 14px 14px 14px !important;
+            padding: 8px 12px 10px 12px !important;
+            border-radius: 18px !important;
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(243, 249, 255, 0.96) 100%) !important;
+            border: 1px solid rgba(205, 220, 235, 0.9) !important;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72), 0 8px 18px rgba(18, 34, 52, 0.06) !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="element-container"]:has(.chat-quick-group-marker) {
+            margin-top: 4px !important;
+            margin-bottom: 8px !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="element-container"]:has(.chat-input-group-marker) {
+            margin-top: 18px !important;
+            margin-bottom: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="stForm"] {
-            padding: 14px 14px 8px !important;
-            border-top: 1px solid hsl(210, 18%, 90%);
-            background: #ffffff;
+            padding: 28px 14px 14px !important;
+            border-top: 1px solid var(--chat-line);
+            background:
+                linear-gradient(180deg, rgba(255, 255, 255, 0.64) 0%, rgba(241, 248, 255, 0.95) 100%);
+            backdrop-filter: blur(5px);
             position: sticky;
             bottom: 0;
             z-index: 3;
@@ -853,6 +1265,7 @@ def render_chatbot_interface(
             div[data-testid="stForm"] form {
             margin-bottom: 0 !important;
             padding-bottom: 0 !important;
+            margin-top: 6px !important;
         }
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="stFormSubmitButton"] {
@@ -865,32 +1278,50 @@ def render_chatbot_interface(
         }
 
         .chat-header {
-            background: hsl(224, 64%, 10%);
+            background:
+                radial-gradient(300px 140px at 100% 0%, rgba(103, 205, 183, 0.28), transparent 56%),
+                linear-gradient(132deg, #0f1d30 0%, #1a3048 58%, #154453 100%);
             color: #ffffff;
-            padding: 22px 22px;
+            padding: 16px 18px 16px 18px;
             display: flex;
             align-items: center;
             gap: 12px;
-            font-weight: 700;
-            font-size: 44px;
-            font-family: "Space Grotesk", sans-serif;
-            border-bottom: 1px solid rgba(255,255,255,0.08);
+            font-family: "Manrope", "Segoe UI", sans-serif;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
             flex-shrink: 0;
             line-height: 1.2;
         }
         .chat-header-logo {
-            width: 46px;
-            height: 46px;
-            border-radius: 50%;
-            background: hsl(163, 74%, 58%);
-            color: hsl(224, 64%, 10%);
+            width: 36px;
+            height: 36px;
+            border-radius: 11px;
+            background: linear-gradient(145deg, #93e3cf, #66cdb8);
+            color: #103840;
             display: inline-flex;
             align-items: center;
             justify-content: center;
             font-weight: 800;
-            font-family: "Space Grotesk", sans-serif;
-            font-size: 28px;
+            font-family: "Fraunces", serif;
+            font-size: 22px;
             line-height: 1;
+            box-shadow: 0 8px 18px rgba(103, 205, 183, 0.38);
+        }
+        .chat-header-text {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .chat-header-title {
+            font-family: "Fraunces", serif;
+            font-size: 19px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            color: #f4f8ff;
+        }
+        .chat-header-sub {
+            font-size: 12px;
+            color: rgba(223, 237, 255, 0.88);
+            font-weight: 600;
         }
         .debug-badge {
             display: inline-flex;
@@ -907,31 +1338,62 @@ def render_chatbot_interface(
         }
 
         .msg-bubble {
-            padding: 14px 18px;
-            border-radius: 20px;
-            font-size: 19px;
-            line-height: 1.35;
-            max-width: 86%;
+            padding: 12px 15px;
+            border-radius: 16px;
+            font-size: 13px;
+            line-height: 1.58;
+            max-width: 85%;
             word-wrap: break-word;
-            font-family: "DM Sans", sans-serif;
+            font-family: "Manrope", "Segoe UI", sans-serif;
+            box-shadow: 0 6px 16px rgba(16, 30, 46, 0.09);
         }
         .msg-user {
-            background: hsl(224, 64%, 10%);
+            background: linear-gradient(145deg, #162842, #27496f);
             color: #ffffff;
             align-self: flex-end;
-            border-bottom-right-radius: 20px;
+            border-radius: 16px 4px 16px 16px;
         }
         .msg-bot {
-            background: hsl(162, 68%, 86%);
-            color: hsl(224, 64%, 10%);
-            border: 1px solid rgba(83, 231, 188, 0.45);
+            background: linear-gradient(180deg, #eef8f3 0%, #e7f4ee 100%);
+            color: #193447;
+            border: 1px solid #d3eadf;
             align-self: flex-start;
-            border-bottom-left-radius: 20px;
+            border-radius: 4px 16px 16px 16px;
+        }
+        .msg-bot.copy-ready {
+            min-width: min(520px, 85%);
+        }
+        .msg-copy-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 10px;
+        }
+        .msg-copy-btn {
+            border: 1px solid #a7cdbf;
+            background: #ffffff;
+            color: #1d4b45;
+            border-radius: 999px;
+            padding: 7px 12px;
+            font-size: 12px;
+            font-weight: 700;
+            font-family: "Manrope", "Segoe UI", sans-serif;
+            cursor: pointer;
+            transition: all .18s ease;
+            box-shadow: 0 2px 8px rgba(28, 68, 64, 0.08);
+        }
+        .msg-copy-btn:hover {
+            background: #f4fbf8;
+            border-color: #79b9aa;
+        }
+        .msg-copy-btn.copied {
+            background: #dff5eb;
+            border-color: #7dc3aa;
+            color: #175743;
         }
         .msg-row-bot {
             display: flex;
             justify-content: flex-start;
-            margin-bottom: 6px;
+            margin-bottom: 2px;
             gap: 12px;
             align-items: flex-start;
         }
@@ -941,27 +1403,28 @@ def render_chatbot_interface(
             margin-bottom: 8px;
         }
         .bot-avatar {
-            width: 50px;
-            height: 50px;
+            width: 36px;
+            height: 36px;
             border-radius: 999px;
             border: 2px solid #ffffff;
-            background: hsl(163, 74%, 58%);
-            color: #ffffff;
+            background: linear-gradient(145deg, #8fe1cb, #67ceb8);
+            color: #11414a;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            font-family: "Space Grotesk", sans-serif;
+            font-family: "Fraunces", serif;
             font-weight: 700;
-            font-size: 28px;
+            font-size: 20px;
             flex-shrink: 0;
+            box-shadow: 0 7px 14px rgba(103, 205, 183, 0.26);
         }
         .msg-loading {
             display: inline-flex;
             align-items: center;
             gap: 8px;
             color: hsl(224, 64%, 10%);
-            background: hsl(162, 68%, 86%);
-            border-color: rgba(83, 231, 188, 0.45);
+            background: #d4f0e5;
+            border-color: #5cb99e;
         }
         .chat-loader {
             width: 14px;
@@ -974,53 +1437,127 @@ def render_chatbot_interface(
         }
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="stTextInput"] input {
-            border: 1px solid #e9edf2 !important;
-            border-radius: 14px !important;
+            border: 1px solid #d1dde8 !important;
+            border-radius: 15px !important;
             background: #ffffff !important;
-            color: hsl(220, 30%, 12%) !important;
-            font-family: "DM Sans", sans-serif !important;
-            min-height: 56px !important;
-            font-size: 18px !important;
+            color: var(--chat-ink) !important;
+            font-family: "Manrope", "Segoe UI", sans-serif !important;
+            min-height: 50px !important;
+            font-size: 14px !important;
+            padding: 12px 16px !important;
+            outline: none !important;
+            box-shadow: 0 3px 8px rgba(20, 36, 52, 0.06) !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stTextInput"] div[data-baseweb="input"] {
+            border: 1px solid #dbe5ef !important;
+            border-radius: 15px !important;
+            box-shadow: none !important;
+            background: #ffffff !important;
         }
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="stTextInput"] input:focus {
-            border-color: hsl(163, 74%, 58%) !important;
-            box-shadow: 0 0 0 3px rgba(83,231,188,0.22) !important;
+            border-color: var(--chat-aqua-strong) !important;
+            outline: none !important;
+            box-shadow: 0 0 0 3px rgba(103, 205, 183, 0.2) !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stTextInput"] div[data-baseweb="input"]:focus-within {
+            border-color: var(--chat-aqua-strong) !important;
+            box-shadow: 0 0 0 3px rgba(103, 205, 183, 0.2) !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stTextInput"] input:invalid,
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stTextInput"] input[aria-invalid="true"],
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stTextInput"] div[data-baseweb="input"][aria-invalid="true"] {
+            border-color: #e9edf2 !important;
+            box-shadow: none !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stForm"] [data-testid="InputInstructions"],
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stForm"] [data-testid="stFormSubmitInstructions"] {
+            display: none !important;
         }
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="stFormSubmitButton"] button {
-            border-radius: 14px !important;
-            border: 1px solid rgba(83,231,188,0.45) !important;
-            background: hsl(163, 74%, 58%) !important;
+            border-radius: 13px !important;
+            border: none !important;
+            background: linear-gradient(145deg, #58bf9f, #45a687) !important;
             color: #ffffff !important;
-            min-height: 56px !important;
-            width: 56px !important;
+            min-height: 48px !important;
+            width: 100% !important;
             font-weight: 700 !important;
-            font-size: 32px !important;
-            line-height: 1 !important;
-            padding: 0 !important;
+            font-size: 18px !important;
+            line-height: 1.1 !important;
+            font-family: "Manrope", "Segoe UI", sans-serif !important;
+            letter-spacing: 0.01em !important;
+            padding: 0 16px !important;
+            box-shadow: 0 9px 18px rgba(74, 168, 138, 0.24) !important;
         }
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="stFormSubmitButton"] button:hover {
-            filter: brightness(0.98);
-            box-shadow: 0 8px 14px rgba(102,198,172,0.24) !important;
+            background: linear-gradient(145deg, #4eb090, #3d987d) !important;
+            transform: translateY(-1px) !important;
+            box-shadow: 0 10px 18px rgba(74, 168, 138, 0.28) !important;
         }
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="stButton"] button {
             border-radius: 999px !important;
-            border: 2px solid hsl(163, 74%, 58%) !important;
-            background: #ffffff !important;
-            color: hsl(224, 64%, 10%) !important;
-            font-family: "DM Sans", sans-serif !important;
+            border: 1px solid #cad9e7 !important;
+            background: linear-gradient(180deg, #ffffff 0%, #f6fbff 100%) !important;
+            color: #1f3a53 !important;
+            font-family: "Manrope", "Segoe UI", sans-serif !important;
             font-weight: 600 !important;
-            min-height: 48px !important;
-            font-size: 16px !important;
-            padding: 0 16px !important;
+            min-height: 40px !important;
+            height: 40px !important;
+            width: 100% !important;
+            font-size: 13px !important;
+            padding: 6px 14px !important;
             white-space: nowrap !important;
+            box-shadow: 0 3px 8px rgba(20, 36, 52, 0.09);
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stButton"] button:hover {
+            background: #edf7ff !important;
+            border-color: #acc7df !important;
+            transform: translateY(-1px) !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="element-container"]:has(.chat-quick-marker) {
+            margin-top: 18px !important;
+            margin-bottom: 14px !important;
+        }
+        .chat-quick-marker {
+            display: none;
+        }
+        .chat-quick-panel-marker {
+            display: none;
+        }
+        .chat-quick-group-marker {
+            display: none;
+        }
+        .chat-quick-spacer {
+            display: block;
+            height: 6px;
+            width: 100%;
+        }
+        .chat-input-group-marker {
+            display: none;
+        }
+        .chat-input-spacer {
+            display: block;
+            height: 16px;
+            width: 100%;
         }
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="element-container"]:has(.chat-messages-area) {
-            margin-bottom: 2px !important;
+            margin-bottom: 6px !important;
         }
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="element-container"]:has(div[data-testid="stButton"]) {
@@ -1028,15 +1565,102 @@ def render_chatbot_interface(
             margin-bottom: 0 !important;
         }
         div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stVerticalBlock"]:has(.chat-quick-panel-marker) [data-testid="stHorizontalBlock"] {
+            justify-content: center !important;
+            gap: 12px !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stVerticalBlock"]:has(.chat-quick-panel-marker) [data-testid="column"] {
+            flex: 0 0 auto !important;
+            width: auto !important;
+            min-width: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="element-container"]:has(.chat-quick-spacer) {
+            margin-top: 0 !important;
+            margin-bottom: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="element-container"]:has(.chat-input-spacer) {
+            margin-top: 0 !important;
+            margin-bottom: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="element-container"]:has(.chat-input-marker) {
+            margin-top: 24px !important;
+            margin-bottom: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
             div[data-testid="stForm"] div[data-testid="stTextInput"] {
             margin-bottom: 0 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stForm"] div[data-testid="column"] {
+            align-items: center !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+            div[data-testid="stForm"] div[data-testid="stTextInput"] > label {
+            margin-bottom: 0 !important;
+        }
+        @media (max-width: 768px) {
+            div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope)) {
+                right: 12px;
+                left: 12px;
+                bottom: 86px;
+                width: auto !important;
+                max-width: none !important;
+                border-radius: 14px;
+                max-height: 80vh;
+            }
+            .chat-header {
+                padding: 14px 14px;
+            }
+            .chat-header-title {
+                font-size: 17px;
+            }
+            .chat-header-sub {
+                font-size: 11px;
+            }
+            .chat-messages-area {
+                padding: 16px 12px 14px 12px;
+                max-height: 46vh;
+            }
+            .chat-messages-area.chat-messages-fresh {
+                min-height: 210px;
+                padding-bottom: 44px;
+            }
+            .msg-bubble {
+                max-width: 90%;
+                font-size: 12px;
+            }
+            div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+                div[data-testid="stButton"] button {
+                min-height: 38px !important;
+                height: 38px !important;
+                font-size: 12px !important;
+            }
+            div[data-testid="stVerticalBlock"]:has(div.chat-window-scope):not(:has(div[data-testid="stVerticalBlock"] div.chat-window-scope))
+                div[data-testid="stVerticalBlock"]:has(.chat-quick-panel-marker) {
+                margin: 8px 10px 12px 10px !important;
+                padding: 8px 10px 10px 10px !important;
+                border-radius: 16px !important;
+            }
+            .chat-quick-spacer {
+                height: 4px;
+            }
+            .chat-input-spacer {
+                height: 12px;
+            }
         }
         @keyframes chat-loader-spin {
             from { transform: rotate(0deg); }
             to { transform: rotate(360deg); }
         }
+        @keyframes chat-window-rise {
+            from { opacity: 0; transform: translateY(10px) scale(0.99); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
     """
-
     st.markdown(f"<style>{fab_css}{window_css}</style>", unsafe_allow_html=True)
 
     # Marker esterno: collassa l'intera sezione chatbot nel layout Streamlit
@@ -1055,28 +1679,34 @@ def render_chatbot_interface(
 
     # 2. CHAT WINDOW CONTAINER
     if st.session_state.chat_visible:
+        sync_notice = st.session_state.pop("chat_sync_notice", "")
+        if sync_notice:
+            st.info(sync_notice)
         # Messaggio di benvenuto persistente alla prima apertura chat
         if not st.session_state.chat_welcome_sent and not st.session_state.messages:
             st.session_state.messages.append(
                 {
                     "role": "assistant",
-                    "content": "Ciao! Sono l'assistente Smart UTM. Dimmi che campagna vuoi tracciare e ti guido passo passo."
+                    "content": "Ciao! Sono l'assistente Smart UTM. Inizia descrivendomi in 1-2 frasi la campagna e ricavo io i parametri passo passo."
                 }
             )
             st.session_state.chat_welcome_sent = True
         with st.container():
             st.markdown('<div class="chat-window-scope" style="display:none;"></div>', unsafe_allow_html=True)
             st.markdown(
-                '<div class="chat-header"><span class="chat-header-logo">W</span><span>Smart UTM Assistant</span></div>',
+                '<div class="chat-header"><span class="chat-header-logo">W</span><span class="chat-header-text"><span class="chat-header-title">Smart UTM Assistant</span><span class="chat-header-sub">Percorso guidato per creare URL UTM coerenti e puliti</span></span></div>',
                 unsafe_allow_html=True,
             )
 
             # MESSAGES - render come HTML puro per evitare spazio nel layout Streamlit
+            has_user_messages = any(m.get("role") == "user" for m in st.session_state.messages)
+            fresh_chat = not has_user_messages
+            messages_area_class = "chat-messages-area chat-messages-fresh" if fresh_chat else "chat-messages-area"
             if not st.session_state.messages and not st.session_state.chat_is_responding:
                 msgs_html = (
-                    '<div class="chat-messages-area">'
+                    f'<div class="{messages_area_class}" role="log" aria-live="polite" aria-atomic="false">'
                     '<div class="msg-row-bot"><span class="bot-avatar">W</span><div class="msg-bubble msg-bot">'
-                    "Ciao! Sono l'assistente Smart UTM. Dimmi che campagna vuoi tracciare e ti guido passo passo."
+                    "Ciao! Sono l'assistente Smart UTM. Inizia descrivendomi in 1-2 frasi la campagna e ricavo io i parametri passo passo."
                     "</div></div></div>"
                 )
             else:
@@ -1089,34 +1719,135 @@ def render_chatbot_interface(
                     )
 
                 for msg in st.session_state.messages:
-                    content = msg["content"].replace("\n", "<br>")
+                    raw_content = str(msg.get("content", ""))
+                    content = html_lib.escape(raw_content).replace("\n", "<br>")
                     if msg["role"] == "user":
                         rows.append(f'<div class="msg-row-user"><div class="msg-bubble msg-user">{content}</div></div>')
                     else:
-                        rows.append(f'<div class="msg-row-bot"><span class="bot-avatar">W</span><div class="msg-bubble msg-bot">{content}</div></div>')
+                        final_url = ""
+                        if "Copia e incolla questo link completo:" in raw_content and "utm_" in raw_content:
+                            final_url = _extract_first_url(raw_content) or ""
+                        if final_url:
+                            safe_url_attr = html_lib.escape(final_url, quote=True)
+                            rows.append(
+                                '<div class="msg-row-bot"><span class="bot-avatar">W</span>'
+                                f'<div class="msg-bubble msg-bot copy-ready">{content}'
+                                '<div class="msg-copy-actions">'
+                                f'<button class="msg-copy-btn" type="button" data-copy-url="{safe_url_attr}">Copia</button>'
+                                '</div></div></div>'
+                            )
+                        else:
+                            rows.append(f'<div class="msg-row-bot"><span class="bot-avatar">W</span><div class="msg-bubble msg-bot">{content}</div></div>')
 
-                msgs_html = '<div class="chat-messages-area">' + ''.join(rows) + '</div>'
+                msgs_html = f'<div class="{messages_area_class}" role="log" aria-live="polite" aria-atomic="false">' + ''.join(rows) + '</div>'
             st.markdown(msgs_html, unsafe_allow_html=True)
+            components.html(
+                """
+                <script>
+                (function () {
+                  const doc = window.parent && window.parent.document ? window.parent.document : document;
+                  const getArea = () => {
+                    const marker = doc.querySelector('.chat-window-scope');
+                    if (!marker) return null;
+                    const scope = marker.closest('div[data-testid="stVerticalBlock"]');
+                    if (!scope) return null;
+                    return scope.querySelector('.chat-messages-area');
+                  };
+                  const scrollToBottom = (area) => {
+                    if (!area) return;
+                    area.scrollTo({ top: area.scrollHeight, behavior: 'smooth' });
+                  };
+                  let tries = 0;
+                  const timer = setInterval(() => {
+                    const area = getArea();
+                    if (!area) {
+                      tries += 1;
+                      if (tries > 50) clearInterval(timer);
+                      return;
+                    }
+                    clearInterval(timer);
+                    scrollToBottom(area);
+                    setTimeout(() => scrollToBottom(area), 80);
+                    setTimeout(() => scrollToBottom(area), 220);
 
-            if not st.session_state.chat_is_responding:
-                st.markdown('<div style="height:2px;"></div>', unsafe_allow_html=True)
-                qr1, qr2, qr3 = st.columns(3)
-                with qr1:
-                    if st.button("Crea UTM", key="quick_reply_create"):
-                        _queue_user_message("Crea UTM")
-                with qr2:
-                    if st.button("Cosa sono gli UTM?", key="quick_reply_what"):
-                        _queue_user_message("Cosa sono gli UTM?")
-                with qr3:
-                    if st.button("Best practice", key="quick_reply_best"):
-                        _queue_user_message("Best practice")
+                    if (!area.dataset.wrAutoScrollBound) {
+                      const observer = new MutationObserver(() => scrollToBottom(area));
+                      observer.observe(area, { childList: true, subtree: true, characterData: true });
+                      area.dataset.wrAutoScrollBound = '1';
+                      window.addEventListener('resize', () => scrollToBottom(area), { passive: true });
+                    }
+                  }, 50);
+
+                  const copyText = async (value) => {
+                    const parentWindow = doc.defaultView || window.parent || window;
+                    try {
+                      if (parentWindow.navigator && parentWindow.navigator.clipboard && parentWindow.isSecureContext) {
+                        await parentWindow.navigator.clipboard.writeText(value);
+                        return true;
+                      }
+                    } catch (err) {}
+
+                    try {
+                      const textarea = doc.createElement('textarea');
+                      textarea.value = value;
+                      textarea.setAttribute('readonly', '');
+                      textarea.style.position = 'fixed';
+                      textarea.style.top = '-1000px';
+                      textarea.style.left = '-1000px';
+                      textarea.style.opacity = '0';
+                      doc.body.appendChild(textarea);
+                      textarea.focus();
+                      textarea.select();
+                      textarea.setSelectionRange(0, textarea.value.length);
+                      const successful = doc.execCommand('copy');
+                      doc.body.removeChild(textarea);
+                      return Boolean(successful);
+                    } catch (err) {
+                      return false;
+                    }
+                  };
+
+                  if (!doc.body.dataset.wrCopyBound) {
+                    doc.addEventListener('click', async (event) => {
+                      const btn = event.target.closest('.msg-copy-btn');
+                      if (!btn) return;
+                      const url = btn.getAttribute('data-copy-url') || '';
+                      if (!url) return;
+                      try {
+                        const copied = await copyText(url);
+                        if (!copied) throw new Error('copy failed');
+                        const oldText = btn.textContent;
+                        btn.textContent = 'Copiato';
+                        btn.classList.add('copied');
+                        setTimeout(() => {
+                          btn.textContent = oldText;
+                          btn.classList.remove('copied');
+                        }, 1400);
+                      } catch (err) {
+                        btn.textContent = 'Copia fallita';
+                        setTimeout(() => {
+                          btn.textContent = 'Copia';
+                        }, 1600);
+                      }
+                    });
+                    doc.body.dataset.wrCopyBound = '1';
+                  }
+                })();
+                </script>
+                """,
+                height=0,
+                width=0,
+            )
 
             # INPUT
             chat_locked = bool(st.session_state.chat_is_responding)
             input_placeholder = "Smart UTM Assistant sta rispondendo..." if chat_locked else "Scrivi un messaggio..."
 
+            st.markdown('<div class="chat-input-group-marker"></div>', unsafe_allow_html=True)
+            st.markdown('<div class="chat-input-spacer"></div>', unsafe_allow_html=True)
+            st.markdown('<div class="chat-input-marker"></div>', unsafe_allow_html=True)
             with st.form("chat_input_form", clear_on_submit=True):
-                input_col, send_col = st.columns([0.82, 0.18], gap="small")
+                input_col, send_col = st.columns([0.8, 0.2], gap="small")
                 with input_col:
                     user_text = st.text_input(
                         "Messaggio",
@@ -1125,7 +1856,7 @@ def render_chatbot_interface(
                         disabled=chat_locked,
                     )
                 with send_col:
-                    submitted = st.form_submit_button("→", use_container_width=True, disabled=chat_locked)
+                    submitted = st.form_submit_button("Invia", use_container_width=True, disabled=chat_locked)
 
             if submitted and user_text and not chat_locked:
                 _queue_user_message(user_text)
@@ -1283,6 +2014,9 @@ def render_chatbot_interface(
                                 api_key,
                             )
                             cleaned = clean_bot_response(response_text)
+                            cleaned = _enforce_guided_single_question(cleaned, utm_ctx)
+                            cleaned = _enforce_client_rule_options(cleaned, utm_ctx, client_rules_text)
+                            cleaned = _enforce_optional_followup(cleaned, utm_ctx)
 
                             st.session_state.messages.append(
                                 {
@@ -1337,5 +2071,7 @@ def render_chatbot_interface(
                     st.session_state.pending_user_text = None
 
                 st.rerun()
+
+
 
 

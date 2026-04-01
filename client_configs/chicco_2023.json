@@ -1,11 +1,11 @@
 {
   "client_id": "chicco_2023",
-  "version": 1,
+  "version": 5,
   "created_at": "2026-03-16 14:43:54",
-  "updated_at": "2026-03-16 14:43:54",
+  "updated_at": "2026-03-30 16:07:52",
   "updated_by": "lisa.saccani@webranking.it",
-  "source_file_name": "W_UTM Builder per Tool UTM (1).xlsx",
-  "source_file_sha256": "11b5c60f840df7b65605f093ca10f4fa12d51c81395a97068c9bd68140886bf2",
+  "source_file_name": "W_UTM Builder per Tool UTM (3).xlsx",
+  "source_file_sha256": "ebe99a080a1020d41507c3786087c18ff238363715ae5521c4935da8865e84c0",
   "ga4_client_name": "Chicco - 2023",
   "rules_rows": [
     {
@@ -13,400 +13,301 @@
       "Unnamed: 1": "",
       "Unnamed: 2": "",
       "Unnamed: 3": "",
-      "__sheet_name": "Definizioni UTM",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Definizioni UTM"
     },
     {
       "Definizioni UTM": "",
       "Unnamed: 1": "",
       "Unnamed: 2": "",
       "Unnamed: 3": "",
-      "__sheet_name": "Definizioni UTM",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Definizioni UTM"
     },
     {
       "Definizioni UTM": "Name",
       "Unnamed: 1": "UTM parameter",
       "Unnamed: 2": "Mandatory",
       "Unnamed: 3": "Definition",
-      "__sheet_name": "Definizioni UTM",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Definizioni UTM"
     },
     {
       "Definizioni UTM": "Campaign Source",
       "Unnamed: 1": "utm_source",
       "Unnamed: 2": "Sì",
       "Unnamed: 3": "Indica la sorgente principale (dettaglio di origine del traffico).",
-      "__sheet_name": "Definizioni UTM",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Definizioni UTM"
     },
     {
       "Definizioni UTM": "Campaign Medium",
       "Unnamed: 1": "utm_medium",
       "Unnamed: 2": "Sì",
       "Unnamed: 3": "Indica il mezzo attraverso cui il traffico è generato.",
-      "__sheet_name": "Definizioni UTM",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Definizioni UTM"
     },
     {
       "Definizioni UTM": "Campaign Name",
       "Unnamed: 1": "utm_campaign",
       "Unnamed: 2": "Sì",
       "Unnamed: 3": "Indica il nome della singola campagna.",
-      "__sheet_name": "Definizioni UTM",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Definizioni UTM"
     },
     {
       "Definizioni UTM": "Campaign Term",
       "Unnamed: 1": "utm_term",
       "Unnamed: 2": "No",
       "Unnamed: 3": "Indica le parole chiave usate per la campagna (o categoria prodotto).",
-      "__sheet_name": "Definizioni UTM",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Definizioni UTM"
     },
     {
       "Definizioni UTM": "Campaign Content",
       "Unnamed: 1": "utm_content",
       "Unnamed: 2": "No",
       "Unnamed: 3": "Usato per differenziare contenuti simili o dettagli della campagna (es. creatività).",
-      "__sheet_name": "Definizioni UTM",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Definizioni UTM"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Traffic Type",
       "Unnamed: 1": "utm_medium",
       "Unnamed: 2": "utm_source",
       "Unnamed: 3": "Note",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Traffic Type",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Organic traffic",
       "Unnamed: 1": "organic",
       "Unnamed: 2": "google, bing, yahoo, yandex...",
       "Unnamed: 3": "Auto-tagged by Google Analytics",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Organic traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Referral traffic",
       "Unnamed: 1": "referral",
       "Unnamed: 2": "[website domain]",
       "Unnamed: 3": "Auto-tagged by Google Analytics",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Referral traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Direct traffic",
       "Unnamed: 1": "(none)",
       "Unnamed: 2": "(direct)",
       "Unnamed: 3": "Auto-tagged by Google Analytics",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Direct traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Paid campaign traffic",
       "Unnamed: 1": "cpc",
       "Unnamed: 2": "google...",
       "Unnamed: 3": "",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Paid campaign traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Affiliate campaign traffic",
       "Unnamed: 1": "affiliate",
       "Unnamed: 2": "tradetracker...",
       "Unnamed: 3": "",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Affiliate campaign traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Display campaign traffic",
       "Unnamed: 1": "cpm",
       "Unnamed: 2": "reservation...",
       "Unnamed: 3": "",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Display campaign traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Video campaign traffic",
       "Unnamed: 1": "cpv",
       "Unnamed: 2": "youtube...",
       "Unnamed: 3": "",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Video campaign traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Programmatic campaign",
       "Unnamed: 1": "cpm",
       "Unnamed: 2": "rcs, mediamond, rai, ilsole24ore, manzoni...",
       "Unnamed: 3": "",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Programmatic campaign",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Organic email traffic",
       "Unnamed: 1": "email",
       "Unnamed: 2": "newsletter",
       "Unnamed: 3": "",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Organic email traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Social organic traffic",
       "Unnamed: 1": "social_org",
       "Unnamed: 2": "facebook, instagram, [social name]",
       "Unnamed: 3": "",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Social organic traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "Social paid traffic",
       "Unnamed: 1": "social_paid",
       "Unnamed: 2": "facebook, instagram, [social name]",
       "Unnamed: 3": "",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "Social paid traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "SMS organic traffic",
       "Unnamed: 1": "sms",
       "Unnamed: 2": "sms, fb_messanger...",
       "Unnamed: 3": "",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "SMS organic traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Naming Convention (Sorgente e Mezzo)": "App traffic",
       "Unnamed: 1": "app",
       "Unnamed: 2": "app",
       "Unnamed: 3": "",
-      "__sheet_name": "Naming Convention (Sorgente e M",
-      "Naming Convention (Sorgente e Mezzo)": "App traffic",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Naming Convention (Sorgente e M"
     },
     {
-      "Definizioni UTM": "",
+      "Regole UTM Campaign (Email e ADV)": "Struttura Email Marketing: brandcountry_campaignType_campaignName_data Esempio:utm_campaign = chiccoitaly_promotional_cashback_21022023",
       "Unnamed: 1": "",
       "Unnamed: 2": "",
       "Unnamed: 3": "",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "Struttura Email Marketing: country_campaignType_campaignName_data (Best Practice) oppure brandcountry_campaignType_campaignName_data (In Uso)",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
     },
     {
-      "Definizioni UTM": "",
-      "Unnamed: 1": "",
-      "Unnamed: 2": "",
-      "Unnamed: 3": "",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
       "Regole UTM Campaign (Email e ADV)": "Struttura Campagne ADV: country_campaignGoal_campaignName",
-      "Esempi di Generazione URL": ""
-    },
-    {
-      "Definizioni UTM": "",
       "Unnamed: 1": "",
       "Unnamed: 2": "",
       "Unnamed: 3": "",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
     },
     {
-      "Definizioni UTM": "",
+      "Regole UTM Campaign (Email e ADV)": "",
+      "Unnamed: 1": "",
+      "Unnamed: 2": "",
+      "Unnamed: 3": "",
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
+    },
+    {
+      "Regole UTM Campaign (Email e ADV)": "Ambito",
       "Unnamed: 1": "Elemento (Token)",
       "Unnamed: 2": "Valori ammessi / Esempi",
       "Unnamed: 3": "Regole / Note",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "Ambito",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
     },
     {
-      "Definizioni UTM": "",
-      "Unnamed: 1": "Country",
-      "Unnamed: 2": "it, ch, es...",
-      "Unnamed: 3": "Obbligatorio",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
       "Regole UTM Campaign (Email e ADV)": "Email & ADV",
-      "Esempi di Generazione URL": ""
-    },
-    {
-      "Definizioni UTM": "",
       "Unnamed: 1": "BrandCountry",
       "Unnamed: 2": "chiccoitaly, chiccospain...",
-      "Unnamed: 3": "Variante \"In Uso\" per Country",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "Email (In Use)",
-      "Esempi di Generazione URL": ""
-    },
-    {
-      "Definizioni UTM": "",
-      "Unnamed: 1": "Campaign Type",
-      "Unnamed: 2": "pr (promotional), ed (editorial), tr (transactional), cj",
       "Unnamed: 3": "Obbligatorio",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "Email",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
     },
     {
-      "Definizioni UTM": "",
+      "Regole UTM Campaign (Email e ADV)": "Email",
+      "Unnamed: 1": "Campaign Type",
+      "Unnamed: 2": "newsletter_promotional, editorial, transactional, cj",
+      "Unnamed: 3": "Obbligatorio",
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
+    },
+    {
+      "Regole UTM Campaign (Email e ADV)": "Email",
       "Unnamed: 1": "Campaign Name",
       "Unnamed: 2": "cashback, loyalty_onboarding_subscribers...",
       "Unnamed: 3": "Testo libero. Includere \"loyalty\" per piani fedeltà.",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "Email",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
     },
     {
-      "Definizioni UTM": "",
+      "Regole UTM Campaign (Email e ADV)": "Email",
       "Unnamed: 1": "Data",
       "Unnamed: 2": "21022023, 01022026...",
       "Unnamed: 3": "Obbligatorio per Email. Formato ddmmyyyy.",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "Email",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
     },
     {
-      "Definizioni UTM": "",
+      "Regole UTM Campaign (Email e ADV)": "Email",
       "Unnamed: 1": "Header/Footer (Eccezione)",
       "Unnamed: 2": "header, footer",
       "Unnamed: 3": "Struttura: country_campaignType_position",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "Email",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
     },
     {
-      "Definizioni UTM": "",
+      "Regole UTM Campaign (Email e ADV)": "ADV",
       "Unnamed: 1": "Campaign Goal",
       "Unnamed: 2": "awr (awareness), rmkt (remarketing), conv (conversions)",
       "Unnamed: 3": "Obbligatorio per ADV",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "ADV",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
     },
     {
-      "Definizioni UTM": "",
+      "Regole UTM Campaign (Email e ADV)": "ADV",
       "Unnamed: 1": "Campaign Name",
       "Unnamed: 2": "next2me...",
       "Unnamed: 3": "Testo libero",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "ADV",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
     },
     {
-      "Definizioni UTM": "",
+      "Regole UTM Campaign (Email e ADV)": "ADV",
       "Unnamed: 1": "Term (utm_term)",
       "Unnamed: 2": "nursing, toys, indoor, fashion, toiletries, car-seat, outdoor",
       "Unnamed: 3": "Categoria prodotto della campagna",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "ADV",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
     },
     {
-      "Definizioni UTM": "",
+      "Regole UTM Campaign (Email e ADV)": "Email & ADV",
       "Unnamed: 1": "Content (utm_content)",
       "Unnamed: 2": "cta, image, clothes-accessories, mainimage...",
       "Unnamed: 3": "Tipo di creatività o dettagli (separati da \"-\")",
-      "__sheet_name": "Regole UTM Campaign (Email e AD",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "Email & ADV",
-      "Esempi di Generazione URL": ""
+      "__sheet_name": "Regole UTM Campaign (Email e AD"
     },
     {
-      "Definizioni UTM": "",
+      "Esempi di Generazione URL": "Nome Esempio",
       "Unnamed: 1": "Mercato / Landing Page",
       "Unnamed: 2": "Parametri UTM",
       "Unnamed: 3": "URL Finale",
-      "__sheet_name": "Esempi di Generazione URL",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": "Nome Esempio"
+      "__sheet_name": "Esempi di Generazione URL"
     },
     {
-      "Definizioni UTM": "",
-      "Unnamed: 1": "Italia (/cashback.html)",
-      "Unnamed: 2": "source: newsletter<br>medium: email<br>campaign: it_pr_cashback_21022023<br>content: mainimage",
-      "Unnamed: 3": "https://www.chicco.it/cashback.html?utm_source=newsletter&utm_medium=email&utm_campaign=it_pr_cashback_21022023&utm_content=mainimage",
-      "__sheet_name": "Esempi di Generazione URL",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": "1. Email Campaign (Cashback)"
+      "Esempi di Generazione URL": "Utm Italia",
+      "Unnamed: 1": "Utm Italia",
+      "Unnamed: 2": "?utm_source=newsletter&utm_medium=email&utm_campaign=chiccoitaly_transactional_wishlist_backinstock_v3&utm_content=cta1",
+      "Unnamed: 3": "",
+      "__sheet_name": "Esempi di Generazione URL"
     },
     {
-      "Definizioni UTM": "",
-      "Unnamed: 1": "Italia (/next2me)",
-      "Unnamed: 2": "source: reservation<br>medium: cpm<br>campaign: it_rmkt_next2me<br>term: indoor<br>content: top-banner",
-      "Unnamed: 3": "https://www.chicco.it/prodotti/relax-e-nanna/culle/next2me?utm_source=reservation&utm_medium=cpm&utm_campaign=it_rmkt_display_next2me&utm_term=indoor&utm_content=top-banner",
-      "__sheet_name": "Esempi di Generazione URL",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": "2. Adv Campaign (Display Next2Me)"
+      "Esempi di Generazione URL": "Utm Francia",
+      "Unnamed: 1": "Utm Francia",
+      "Unnamed: 2": "?utm_source=newsletter&utm_medium=email&utm_campaign=chiccofrance_transactional_wishlist_backinstock_v3&utm_content=cta1",
+      "Unnamed: 3": "",
+      "__sheet_name": "Esempi di Generazione URL"
     },
     {
-      "Definizioni UTM": "",
-      "Unnamed: 1": "Italia (/programma-fedelta.html)",
-      "Unnamed: 2": "source: newsletter<br>medium: email<br>campaign: chiccoitaly_cj_loyalty_onboarding_subscribers_step1_01022026",
-      "Unnamed: 3": "https://www.chicco.it/programma-fedelta.html?utm_source=newsletter&utm_medium=email&utm_campaign=chiccoitaly_cj_loyalty_onboarding_subscribers_step1_01022026",
-      "__sheet_name": "Esempi di Generazione URL",
-      "Naming Convention (Sorgente e Mezzo)": "",
-      "Regole UTM Campaign (Email e ADV)": "",
-      "Esempi di Generazione URL": "3. Chicco Club Email (Loyalty)"
+      "Esempi di Generazione URL": "Utm Belgio FR",
+      "Unnamed: 1": "Utm Belgio FR",
+      "Unnamed: 2": "?utm_source=newsletter&utm_medium=email&utm_campaign=chiccobelgium_transactional_wishlist_backinstock_v3_fr&utm_content=cta1",
+      "Unnamed: 3": "",
+      "__sheet_name": "Esempi di Generazione URL"
+    },
+    {
+      "Esempi di Generazione URL": "Utm Belgio NL",
+      "Unnamed: 1": "Utm Belgio NL",
+      "Unnamed: 2": "?utm_source=newsletter&utm_medium=email&utm_campaign=chiccobelgium_transactional_wishlist_backinstock_v3_nl&utm_content=cta1",
+      "Unnamed: 3": "",
+      "__sheet_name": "Esempi di Generazione URL"
+    },
+    {
+      "Esempi di Generazione URL": "Utm Portogallo",
+      "Unnamed: 1": "Utm Portogallo",
+      "Unnamed: 2": "?utm_source=newsletter&utm_medium=email&utm_campaign=chiccoportugal_transactional_wishlist_backinstock_v3&utm_content=cta1",
+      "Unnamed: 3": "",
+      "__sheet_name": "Esempi di Generazione URL"
+    },
+    {
+      "Esempi di Generazione URL": "Utm Spagna",
+      "Unnamed: 1": "Utm Spagna",
+      "Unnamed: 2": "?utm_source=newsletter&utm_medium=email&utm_campaign=chiccospaign_transactional_wishlist_backinstock_v3&utm_content=cta1",
+      "Unnamed: 3": "",
+      "__sheet_name": "Esempi di Generazione URL"
+    },
+    {
+      "Esempi di Generazione URL": "Utm FDR",
+      "Unnamed: 1": "Utm FDR",
+      "Unnamed: 2": "?utm_source=newsletter&utm_medium=email&utm_campaign=chiccofdritaly_transactional_wishlist_backinstock_v2&utm_content=cta1",
+      "Unnamed: 3": "",
+      "__sheet_name": "Esempi di Generazione URL"
     }
   ],
   "last_added_rows_count": 40,
@@ -414,5 +315,11 @@
   "shared_link": "https://utm-builder.streamlit.app/?client_id=chicco_2023&sig=4ebae462eac440f7045a9bfa7b5af584d1a97d492a18a0e23e7cb1c9ab4b33a4",
   "shared_base_url": "https://utm-builder.streamlit.app/",
   "shared_link_updated_at": "2026-03-16 14:45:32",
-  "shared_link_updated_by": "lisa.saccani@webranking.it"
+  "shared_link_updated_by": "lisa.saccani@webranking.it",
+  "ga4_property_name": "01 - www.chicco.it",
+  "ga4_property_id": "273699696",
+  "property_config": {
+    "default_country": "it",
+    "expected_domain": ""
+  }
 }
