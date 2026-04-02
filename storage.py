@@ -33,6 +33,10 @@ class UTMHistoryStore(Protocol):
         """Insert or update (by user_email + property_id + final_url composite key)."""
         ...
 
+    def write_all(self, items: list[dict]) -> None:
+        """Overwrite all entries (used by save_utm_history for session cache sync)."""
+        ...
+
     def delete_for_user(self, user_email: str, final_url: str) -> None:
         """Delete a specific entry."""
         ...
@@ -217,7 +221,7 @@ class FileUTMHistoryStore:
             logger.exception("FileUTMHistoryStore: failed to read %s", self._path)
         return []
 
-    def _write_all(self, items: list[dict]) -> None:
+    def write_all(self, items: list[dict]) -> None:
         safe = [x for x in (items or []) if isinstance(x, dict)]
         try:
             self._path.write_text(
@@ -249,7 +253,7 @@ class FileUTMHistoryStore:
             items.append(entry)
         else:
             items[idx].update(entry)
-        self._write_all(items)
+        self.write_all(items)
 
     def delete_for_user(self, user_email: str, final_url: str) -> None:
         items = self._read_all()
@@ -257,7 +261,7 @@ class FileUTMHistoryStore:
             x for x in items
             if not (x.get("user_email") == user_email and x.get("final_url") == final_url)
         ]
-        self._write_all(items)
+        self.write_all(items)
 
 
 class FileClientConfigStore:
@@ -387,10 +391,25 @@ class FileCredentialStore:
 # PostgresStorage implementations
 # ---------------------------------------------------------------------------
 
+_pg_pool = None
+
+
 def _get_pg_connection(dsn: str):
-    """Create a psycopg2 connection. Caller must close it."""
-    import psycopg2
-    return psycopg2.connect(dsn)
+    """Get a connection from the pool. Caller must call _put_pg_connection() to return it."""
+    global _pg_pool
+    if _pg_pool is None:
+        from psycopg2 import pool as _pool
+        _pg_pool = _pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=dsn)
+        logger.info("PostgreSQL connection pool created (1-10 connections)")
+    return _pg_pool.getconn()
+
+
+def _put_pg_connection(conn) -> None:
+    """Return a connection to the pool instead of closing it."""
+    if _pg_pool is not None:
+        _pg_pool.putconn(conn)
+    else:
+        conn.close()
 
 
 class PostgresUTMHistoryStore:
@@ -412,7 +431,7 @@ class PostgresUTMHistoryStore:
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
     def load_for_user(self, user_email: str) -> list[dict]:
         eh = _email_hash(user_email)
@@ -429,7 +448,7 @@ class PostgresUTMHistoryStore:
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
     def upsert(self, entry: dict) -> None:
         eh = _email_hash(entry.get("user_email", ""))
@@ -459,7 +478,37 @@ class PostgresUTMHistoryStore:
                 )
             conn.commit()
         finally:
-            conn.close()
+            _put_pg_connection(conn)
+
+    def write_all(self, items: list[dict]) -> None:
+        """Replace all entries. Used for bulk sync from session cache."""
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM utm_history")
+                for entry in items:
+                    if not isinstance(entry, dict):
+                        continue
+                    eh = _email_hash(entry.get("user_email", ""))
+                    cur.execute(
+                        "INSERT INTO utm_history "
+                        "(user_email_hash, user_email, client_id, property_id, property_name, "
+                        " final_url, utm_source, utm_medium, utm_campaign, campaign_name, "
+                        " live_date, expected_channel, tracking_status, created_at) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())",
+                        (
+                            eh, entry.get("user_email", ""), entry.get("client_id", ""),
+                            entry.get("property_id", ""), entry.get("property_name", ""),
+                            entry.get("final_url", ""), entry.get("utm_source", ""),
+                            entry.get("utm_medium", ""), entry.get("utm_campaign", ""),
+                            entry.get("campaign_name", ""), entry.get("live_date", ""),
+                            entry.get("expected_channel_group", ""),
+                            entry.get("tracking_status", "pending"),
+                        ),
+                    )
+            conn.commit()
+        finally:
+            _put_pg_connection(conn)
 
     def delete_for_user(self, user_email: str, final_url: str) -> None:
         eh = _email_hash(user_email)
@@ -472,7 +521,7 @@ class PostgresUTMHistoryStore:
                 )
             conn.commit()
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
 
 class PostgresClientConfigStore:
@@ -504,7 +553,7 @@ class PostgresClientConfigStore:
                     logger.error("Client config '%s' validation failed: %s", cid, e)
                 return payload
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
     def save(self, client_id: str, payload: dict) -> None:
         from utm_normalize import normalize_client_id
@@ -527,7 +576,7 @@ class PostgresClientConfigStore:
                 )
             conn.commit()
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
     def list_ids(self) -> list[str]:
         conn = _get_pg_connection(self._dsn)
@@ -536,7 +585,7 @@ class PostgresClientConfigStore:
                 cur.execute("SELECT client_id FROM client_configs ORDER BY client_id")
                 return [row[0] for row in cur.fetchall()]
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
     def delete(self, client_id: str) -> None:
         from utm_normalize import normalize_client_id
@@ -547,7 +596,7 @@ class PostgresClientConfigStore:
                 cur.execute("DELETE FROM client_configs WHERE client_id = %s", (cid,))
             conn.commit()
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
 
 class PostgresCredentialStore:
@@ -582,7 +631,7 @@ class PostgresCredentialStore:
                 )
             conn.commit()
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
     def load_token(self, user_email: str) -> Optional[str]:
         eh = _email_hash(user_email)
@@ -598,7 +647,7 @@ class PostgresCredentialStore:
                 row = cur.fetchone()
                 return row[0] if row else None
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
     def delete_token(self, user_email: str) -> None:
         eh = _email_hash(user_email)
@@ -612,7 +661,7 @@ class PostgresCredentialStore:
                 )
             conn.commit()
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
     def save_api_key(self, user_email: str, service: str, key: str) -> None:
         conn = _get_pg_connection(self._dsn)
@@ -628,7 +677,7 @@ class PostgresCredentialStore:
                 )
             conn.commit()
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
     def load_api_key(self, user_email: str, service: str) -> Optional[str]:
         eh = _email_hash(user_email)
@@ -644,7 +693,7 @@ class PostgresCredentialStore:
                 row = cur.fetchone()
                 return row[0] if row else None
         finally:
-            conn.close()
+            _put_pg_connection(conn)
 
 
 # ---------------------------------------------------------------------------

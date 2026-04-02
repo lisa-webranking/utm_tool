@@ -79,16 +79,10 @@ st.markdown(f"<style>{_css_path.read_text(encoding='utf-8')}</style>", unsafe_al
 
 
 
-# --- GOOGLE AUTH FUNCTIONS ---
-SCOPES = [
-    'https://www.googleapis.com/auth/analytics.readonly',
-    'https://www.googleapis.com/auth/analytics.edit',
-    'https://www.googleapis.com/auth/userinfo.email',
-    'openid'
-]
-
-
+# --- GOOGLE AUTH ---
 SCOPES = _auth.SCOPES
+
+
 def get_oauth_flow():
     """Configura l'oggetto Flow per Web OAuth."""
     secrets_path = _BASE_DIR / "client_secrets.json"
@@ -100,6 +94,8 @@ def get_oauth_flow():
     if flow is None:
         st.error("Configurazione OAuth (client_secrets.json o st.secrets) mancante!")
     return flow
+
+
 # --- DATI GUIDA (Fallback e Mapping) ---
 def get_ga4_accounts_structure(creds):
     try:
@@ -402,7 +398,7 @@ def load_utm_history():
 def save_utm_history(items):
     safe_items = [x for x in (items or []) if isinstance(x, dict)]
     st.session_state.utm_history = safe_items
-    _history_store._write_all(safe_items)
+    _history_store.write_all(safe_items)
 
 def infer_expected_channel_group(utm_medium: str) -> str:
     m = normalize_medium_token(utm_medium)

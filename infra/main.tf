@@ -5,6 +5,10 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 5.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -57,8 +61,12 @@ resource "google_sql_database_instance" "main" {
     disk_autoresize   = true
 
     ip_configuration {
-      ipv4_enabled = false
-      # Private IP via default VPC — Cloud Run connects via Cloud SQL connector
+      # Cloud Run connects via Cloud SQL Auth Proxy (Unix socket),
+      # so we only need a minimal IP config. Enable public IP for
+      # initial schema migration via gcloud sql connect.
+      ipv4_enabled    = true
+      require_ssl     = true
+      authorized_networks {}
     }
 
     backup_configuration {

@@ -51,4 +51,4 @@ CREATE TABLE IF NOT EXISTS utm_history (
 
 CREATE INDEX IF NOT EXISTS idx_utm_history_user ON utm_history(user_email_hash);
 CREATE INDEX IF NOT EXISTS idx_utm_history_client ON utm_history(client_id);
-CREATE INDEX IF NOT EXISTS idx_utm_history_url ON utm_history(user_email_hash, property_id, final_url);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_utm_history_url ON utm_history(user_email_hash, property_id, final_url);
