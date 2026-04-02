@@ -1,4 +1,7 @@
 # -*- coding: latin-1 -*-
+from log_config import setup_logging
+setup_logging()
+
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd

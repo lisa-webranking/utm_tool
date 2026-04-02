@@ -924,6 +924,43 @@ ISTRUZIONI BASATE SULLO STATO
 # -------------------------
 # Gemini wrapper
 # -------------------------
+class GeminiError(Exception):
+    """User-facing Gemini error with actionable message."""
+    pass
+
+
+def _classify_gemini_error(error: Exception) -> str:
+    """Return a user-friendly Italian message based on the error type."""
+    msg = str(error).lower()
+
+    if "api key" in msg or "api_key" in msg or "invalid" in msg and "key" in msg:
+        return (
+            "Chiave API non valida. "
+            "Controlla la tua chiave Gemini nelle impostazioni (icona ingranaggio)."
+        )
+    if "permission" in msg or "403" in msg or "forbidden" in msg:
+        return (
+            "Permesso negato. La chiave API potrebbe non avere accesso ai modelli Gemini. "
+            "Verifica nella Google AI Studio che la chiave sia attiva."
+        )
+    if "quota" in msg or "429" in msg or "rate" in msg or "resource exhausted" in msg:
+        return (
+            "Limite di utilizzo raggiunto per la chiave API. "
+            "Riprova tra qualche minuto o verifica la quota nella Google AI Studio."
+        )
+    if "500" in msg or "internal" in msg or "unavailable" in msg or "503" in msg:
+        return (
+            "Il servizio Gemini è temporaneamente non disponibile. "
+            "Riprova tra qualche minuto."
+        )
+    if "timeout" in msg or "deadline" in msg:
+        return (
+            "La richiesta ha impiegato troppo tempo. "
+            "Riprova con un messaggio più breve."
+        )
+    return f"Errore imprevisto dal servizio AI: {str(error)[:200]}"
+
+
 def get_gemini_response_safe(
     user_input: str,
     history: List[Dict[str, Any]],
@@ -934,6 +971,7 @@ def get_gemini_response_safe(
     """
     Tenta di ottenere una risposta provando una lista estesa di modelli.
     Ritorna: (testo, nome_modello)
+    Raises GeminiError con messaggio user-friendly.
     """
     models_to_try = [
         "gemini-2.0-flash",
@@ -966,16 +1004,21 @@ def get_gemini_response_safe(
             last_error = e
             error_str = str(e).lower()
 
+            # Model not available — try next
             if "404" in error_str or "not found" in error_str or "not supported" in error_str:
                 continue
+            # Auth/permission error — no point trying other models
             if "api key" in error_str or "permission" in error_str or "403" in error_str:
-                raise e
+                raise GeminiError(_classify_gemini_error(e)) from e
+            # Quota/rate limit — no point trying other models
+            if "429" in error_str or "quota" in error_str or "resource exhausted" in error_str:
+                raise GeminiError(_classify_gemini_error(e)) from e
+            # Other error — try next model
             continue
 
-    raise Exception(
-        "❌ Impossibile trovare un modello Gemini attivo per questa API Key.\\n"
-        f"Ultimo errore: {str(last_error)}\\n"
-    )
+    raise GeminiError(_classify_gemini_error(
+        last_error or Exception("Nessun modello Gemini disponibile")
+    ))
 
 
 # -------------------------
@@ -1439,31 +1482,39 @@ def render_chatbot_interface(
                                 text = msg.get("raw_content", msg["content"])
                                 history.append({"role": role, "parts": [text]})
 
-                            response_text, _ = get_gemini_response_safe(
-                                pending_text,
-                                history,
-                                my_tools,
-                                system_instruction,
-                                api_key,
-                            )
-                            cleaned = clean_bot_response(response_text)
-                            cleaned = _enforce_guided_single_question(cleaned, utm_ctx)
-                            cleaned = _enforce_client_rule_options(cleaned, utm_ctx, client_rules_text)
-                            cleaned = _enforce_optional_followup(cleaned, utm_ctx)
+                            # Rate limit check
+                            from rate_limit import check_rate_limit
+                            _rl_key = st.session_state.get("user_email", "anon")
+                            _rl_ok, _rl_wait = check_rate_limit(_rl_key)
+                            if not _rl_ok:
+                                cleaned = f"Troppi messaggi. Riprova tra {_rl_wait:.0f} secondi."
+                            else:
+                                response_text, _ = get_gemini_response_safe(
+                                    pending_text,
+                                    history,
+                                    my_tools,
+                                    system_instruction,
+                                    api_key,
+                                )
+                                cleaned = clean_bot_response(response_text)
+                                cleaned = _enforce_guided_single_question(cleaned, utm_ctx)
+                                cleaned = _enforce_client_rule_options(cleaned, utm_ctx, client_rules_text)
+                                cleaned = _enforce_optional_followup(cleaned, utm_ctx)
 
                             st.session_state.messages.append(
                                 {
                                     "role": "assistant",
                                     "content": cleaned,
-                                    "raw_content": response_text,
+                                    "raw_content": response_text if _rl_ok else cleaned,
                                 }
                             )
 
-                            # Update conversation context
-                            _update_context_from_response(response_text, pending_text, utm_ctx)
+                            # Update conversation context (skip if rate-limited)
+                            if _rl_ok:
+                                _update_context_from_response(response_text, pending_text, utm_ctx)
 
                             # Salva automaticamente nello storico UTM, se disponibile un link finale.
-                            if callable(history_save_func):
+                            if _rl_ok and callable(history_save_func):
                                 try:
                                     final_url = _extract_first_url(cleaned or "")
                                     if final_url and "utm_" in final_url:
@@ -1497,8 +1548,11 @@ def render_chatbot_interface(
                                 except Exception:
                                     pass
 
+                except GeminiError as e:
+                    st.session_state.messages.append({"role": "assistant", "content": str(e)})
                 except Exception as e:
-                    st.session_state.messages.append({"role": "assistant", "content": f"Errore: {str(e)}"})
+                    logger.exception("Unexpected error in chatbot")
+                    st.session_state.messages.append({"role": "assistant", "content": f"Errore imprevisto: {str(e)[:200]}"})
                 finally:
                     st.session_state.chat_is_responding = False
                     st.session_state.pending_user_text = None
