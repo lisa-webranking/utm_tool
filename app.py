@@ -52,9 +52,16 @@ def _get_config_value(name: str) -> str:
 
 
 CLIENT_LINK_SECRET = _get_config_value("CLIENT_LINK_SECRET")
-CLIENT_CONFIG_DIR = Path(__file__).with_name("client_configs")
-TOKEN_FILE_PATH = Path(__file__).with_name("token.json")
-UTM_HISTORY_FILE_PATH = Path(__file__).with_name("utm_history.json")
+_BASE_DIR = Path(__file__).parent
+
+# Legacy constants — kept for any remaining direct references
+CLIENT_CONFIG_DIR = _BASE_DIR / "client_configs"
+TOKEN_FILE_PATH = _BASE_DIR / "token.json"
+UTM_HISTORY_FILE_PATH = _BASE_DIR / "utm_history.json"
+
+# --- Storage layer ---
+from storage import create_file_stores, _email_hash
+_history_store, _config_store, _cred_store = create_file_stores(_BASE_DIR)
 
 # --- CSS (STILE CLEAN + CHECKER CORRETTO) ---
 st.markdown("""
@@ -1773,29 +1780,12 @@ def _client_config_path(client_id: str) -> Path:
 
 
 def load_client_config(client_id: str):
-    cid = normalize_client_id(client_id)
-    if not cid:
-        return None
-    path = _client_config_path(cid)
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else None
-    except Exception:
-        return None
+    return _config_store.load(client_id)
 
 
 def save_client_config(client_id: str, payload: dict) -> Path:
-    cid = normalize_client_id(client_id)
-    if not cid:
-        raise ValueError("client_id non valido")
-    CLIENT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    path = _client_config_path(cid)
-    body = dict(payload or {})
-    body["client_id"] = cid
-    path.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    _config_store.save(client_id, payload)
+    return _client_config_path(client_id)
 
 
 def parse_rules_rows_from_uploaded_file(file_name: str, file_bytes: bytes) -> list:
@@ -1823,8 +1813,7 @@ def parse_rules_rows_from_uploaded_file(file_name: str, file_bytes: bytes) -> li
 
 
 def list_saved_client_ids() -> list:
-    CLIENT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    return sorted({p.stem for p in CLIENT_CONFIG_DIR.glob("*.json")})
+    return _config_store.list_ids()
 
 
 def sign_client_id(client_id: str) -> str:
@@ -2233,17 +2222,7 @@ def resolve_locked_client_context(locked_client_id: str):
 def load_utm_history():
     if "utm_history" in st.session_state:
         return st.session_state.utm_history
-
-    items = []
-    try:
-        if UTM_HISTORY_FILE_PATH.exists():
-            raw = UTM_HISTORY_FILE_PATH.read_text(encoding="utf-8").strip()
-            loaded = json.loads(raw) if raw else []
-            if isinstance(loaded, list):
-                items = [x for x in loaded if isinstance(x, dict)]
-    except Exception:
-        items = []
-
+    items = _history_store.load_all()
     st.session_state.utm_history = items
     return st.session_state.utm_history
 
@@ -2251,10 +2230,7 @@ def load_utm_history():
 def save_utm_history(items):
     safe_items = [x for x in (items or []) if isinstance(x, dict)]
     st.session_state.utm_history = safe_items
-    try:
-        UTM_HISTORY_FILE_PATH.write_text(json.dumps(safe_items, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    _history_store._write_all(safe_items)
 
 def infer_expected_channel_group(utm_medium: str) -> str:
     m = normalize_medium_token(utm_medium)
@@ -2275,17 +2251,9 @@ def infer_expected_channel_group(utm_medium: str) -> str:
     return "Other"
 
 def upsert_utm_history_entry(entry: dict):
-    items = load_utm_history()
-    key_fields = ("user_email", "property_id", "final_url")
-    idx = next(
-        (i for i, x in enumerate(items) if all(x.get(k) == entry.get(k) for k in key_fields)),
-        None
-    )
-    if idx is None:
-        items.append(entry)
-    else:
-        items[idx].update(entry)
-    save_utm_history(items)
+    _history_store.upsert(entry)
+    # Invalidate session cache so next load_utm_history() re-reads from disk
+    st.session_state.pop("utm_history", None)
 
 def parse_ddmmyyyy_to_date(date_str: str):
     try:
@@ -2329,9 +2297,11 @@ def save_chatbot_url_to_history(final_url: str, property_id: str = "") -> bool:
             or ""
         )
 
+        user_email = st.session_state.get("user_email", "")
         entry = {
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "user_email": st.session_state.get("user_email", ""),
+            "user_email": user_email,
+            "user_email_hash": _email_hash(user_email),
             "property_id": prop_id_raw,
             "property_name": property_name,
             "client_id": st.session_state.get("active_client_id", ""),
@@ -2613,19 +2583,34 @@ def get_oauth_cache():
 
 def _save_persistent_credentials(creds: Credentials) -> None:
     """Persist OAuth credentials so login survives browser/session restarts."""
-    try:
-        TOKEN_FILE_PATH.write_text(creds.to_json(), encoding="utf-8")
-    except Exception:
-        # Non bloccare il flusso UI se il salvataggio fallisce.
-        pass
+    email = st.session_state.get("user_email", "")
+    if email:
+        _cred_store.save_token(email, creds.to_json())
+    else:
+        # Fallback: save to legacy token.json (email not yet known)
+        try:
+            TOKEN_FILE_PATH.write_text(creds.to_json(), encoding="utf-8")
+        except Exception:
+            pass
 
 
 def _load_persistent_credentials() -> Optional[Credentials]:
     """Load and auto-refresh persisted OAuth credentials if available."""
-    if not TOKEN_FILE_PATH.exists():
+    email = st.session_state.get("user_email", "")
+
+    # Try per-user store first, then legacy token.json
+    token_json = _cred_store.load_token(email) if email else None
+    if not token_json and TOKEN_FILE_PATH.exists():
+        try:
+            token_json = TOKEN_FILE_PATH.read_text(encoding="utf-8")
+        except Exception:
+            token_json = None
+
+    if not token_json:
         return None
     try:
-        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE_PATH), SCOPES)
+        import json as _json
+        creds = Credentials.from_authorized_user_info(_json.loads(token_json), SCOPES)
         if creds and creds.valid:
             return creds
         if creds and creds.expired and creds.refresh_token:
@@ -2639,10 +2624,15 @@ def _load_persistent_credentials() -> Optional[Credentials]:
 
 def _logout_current_user() -> None:
     """Clear runtime session and persisted credentials only on explicit logout."""
+    email = st.session_state.get("user_email", "")
     for key in ("credentials", "user_email", "gemini_api_key", "google_credentials"):
         st.session_state.pop(key, None)
     st.session_state.pop("ga4_accounts", None)
     st.session_state.pop("ga4_cache_user_email", None)
+    # Delete per-user token
+    if email:
+        _cred_store.delete_token(email)
+    # Delete legacy token.json
     try:
         if TOKEN_FILE_PATH.exists():
             TOKEN_FILE_PATH.unlink()
@@ -3619,9 +3609,11 @@ def show_dashboard():
                     final_url = f"{destination_url}{sep}{utm_query}"
 
                     # Save candidate entry for history tab
+                    _hist_email = st.session_state.get("user_email", "")
                     history_entry = {
                         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "user_email": st.session_state.get("user_email", ""),
+                        "user_email": _hist_email,
+                        "user_email_hash": _email_hash(_hist_email),
                         "property_id": sel_prop_id or "",
                         "property_name": selected_prop_name or "",
                         "campaign_name": utm_campaign,
@@ -4194,7 +4186,11 @@ def show_dashboard():
         prop_lookup = build_property_name_lookup(st.session_state.get("ga4_accounts", []))
         user_email = st.session_state.get("user_email", "")
         if user_email:
-            history_items = [x for x in history_items if x.get("user_email") == user_email]
+            target_hash = _email_hash(user_email)
+            history_items = [
+                x for x in history_items
+                if x.get("user_email_hash") == target_hash or x.get("user_email") == user_email
+            ]
         history_items = sorted(
             history_items,
             key=lambda x: (x.get("live_date", ""), x.get("campaign_name", "")),
