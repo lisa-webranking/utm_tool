@@ -29,6 +29,10 @@ import google.generativeai as genai
 from googleapi import get_persistent_api_key, save_persistent_api_key, get_user_email
 import ga4_mcp_tools # Import tools module
 from functools import partial
+from utm_normalize import (
+    normalize_token, normalize_medium_token, normalize_client_id,
+    suggest_naming_value, validate_naming_rules,
+)
 
 # Import new Chatbot UI
 from chatbot_ui import render_chatbot_interface
@@ -1572,70 +1576,6 @@ def get_oauth_flow():
     flow.redirect_uri = redirect_uri
     return flow
 
-def do_oauth_flow():
-    """Gestisce il flow di autenticazione Google OAuth 2.0 Web"""
-    
-    # Controlla se le credenziali sono giÃ  in sessione
-    if 'google_credentials' in st.session_state and st.session_state.google_credentials:
-        creds = Credentials(
-            token=st.session_state.google_credentials['token'],
-            refresh_token=st.session_state.google_credentials.get('refresh_token'),
-            token_uri=st.session_state.google_credentials.get('token_uri'),
-            client_id=st.session_state.google_credentials.get('client_id'),
-            client_secret=st.session_state.google_credentials.get('client_secret'),
-            scopes=st.session_state.google_credentials.get('scopes')
-        )
-        
-        if creds.valid:
-            return creds
-        if creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-                # Aggiorna sessione
-                st.session_state.google_credentials['token'] = creds.token
-                _save_persistent_credentials(creds)
-                return creds
-            except Exception:
-                st.session_state.google_credentials = None
-                
-    # Verifica se stiamo tornando da un redirect di login
-    query_params = st.query_params
-    if 'code' in query_params:
-        flow = get_oauth_flow()
-        if not flow:
-            return None
-            
-        try:
-            # Recupera il token
-            code = query_params['code']
-            flow.fetch_token(code=code)
-            creds = flow.credentials
-            
-            # Salva credenziali scalari compatibili con JSON in session_state, NO file
-            st.session_state.google_credentials = {
-                'token': creds.token,
-                'refresh_token': creds.refresh_token,
-                'token_uri': creds.token_uri,
-                'client_id': creds.client_id,
-                'client_secret': creds.client_secret,
-                'scopes': creds.scopes
-            }
-            _save_persistent_credentials(creds)
-            
-            # Ripulisci l'URL (rimuovi ?code=...) cosÃ¬ se refresha la pagina non va in crash
-            import urllib.parse
-            if hasattr(st, "query_params"):
-                st.query_params.clear()
-            else:
-                st.experimental_set_query_params() # per vecchie versioni streamlit
-                
-            st.rerun() # Forza rerun per mostrare UI pulita
-        except Exception as e:
-            st.error(f"Errore durante l'accesso: {e}")
-            
-    # Se arriva qui, serve fare il login
-    return None
-
 def get_ga4_accounts_structure(creds):
     """Recupera la struttura Account -> Properties usando ga4_mcp_tools"""
     try:
@@ -1756,57 +1696,6 @@ def get_compatible_channels(selected_source, all_client_channels):
     filtered_channels = [c for c in all_client_channels if c in compatible_types]
     return [""] + sorted(filtered_channels) if filtered_channels else [""] + all_client_channels
 
-def normalize_token(text):
-    if not text: return ""
-    return slugify(text, separator="-", lowercase=True)
-
-
-def normalize_client_id(value: str) -> str:
-    return slugify((value or "").strip(), separator="_")
-
-def normalize_medium_token(text):
-    """Normalizza utm_medium preservando underscore GA4 (es. social_paid)."""
-    if not text:
-        return ""
-    value = str(text).strip().lower()
-    value = value.replace("-", "_")
-    value = re.sub(r"\s+", "_", value)
-    value = re.sub(r"[^a-z0-9_-]", "", value)
-    value = re.sub(r"_+", "_", value).strip("_")
-    return value
-
-def suggest_naming_value(text, prefer_hyphen=True):
-    """Produce a best-practice suggestion for campaign naming values."""
-    if not text:
-        return ""
-    value = str(text).strip().lower()
-    value = re.sub(r"\s+", "-", value)
-    value = re.sub(r"[^a-z0-9_-]", "", value)
-    if prefer_hyphen:
-        value = value.replace("_", "-")
-    value = re.sub(r"-{2,}", "-", value)
-    value = re.sub(r"_{2,}", "_", value)
-    return value.strip("-_")
-
-def validate_naming_rules(text, prefer_hyphen=True):
-    """Return (issues, suggestion) for naming best-practices validation."""
-    issues = []
-    if not text:
-        return issues, ""
-    raw = str(text).strip()
-    suggestion = suggest_naming_value(raw, prefer_hyphen=prefer_hyphen)
-
-    if raw != raw.lower():
-        issues.append("usa solo minuscole")
-    if re.search(r"\s", raw):
-        issues.append("evita spazi")
-    if re.search(r"[^A-Za-z0-9_-]", raw):
-        issues.append("evita caratteri speciali")
-    if prefer_hyphen and "_" in raw:
-        issues.append("preferisci trattini (-) agli underscore (_)")
-    if len(raw) > 50:
-        issues.append("mantieni il nome descrittivo ma conciso")
-    return issues, suggestion
 
 def filter_options_by_source_mode(options, mode, field):
     """Filter source/medium options according to selected traffic source mode preserving input priority order."""
@@ -2914,7 +2803,7 @@ def show_dashboard():
                 elif isinstance(result, dict) and "error" in result:
                     error_type = result.get("error_type", "Sconosciuto")
                     error_msg = result.get("error", "")
-                    st.error(f"â�Errore GA4\n\n**Tipo:** {error_type}\n\n**Dettaglio:** {error_msg}")
+                    st.error(f"â�Errore GA4\n\n**Tipo:** {error_type}\n\n**Dettaglio:** {error_msg}")
                     if any(kw in error_msg.lower() for kw in ["credentials", "scope", "permission", "unauthenticated", "unauthorized", "403", "401"]):
                         st.warning("ðŸ’¡ Il token OAuth potrebbe avere scope insufficienti. Prova a fare **Logout** e ri-accedere con Google.")
                 else:
@@ -3986,7 +3875,7 @@ def show_dashboard():
                 }
             )
         if st.session_state.get("client_id_lock"):
-            st.warning("Modalita�  cliente bloccata attiva in questa sessione.")
+            st.warning("Modalita�  cliente bloccata attiva in questa sessione.")
             if st.button("Sblocca modalitÃ  cliente", key="unlock_client_mode_btn"):
                 st.session_state.client_id_lock = ""
                 st.session_state.client_lock_error = ""

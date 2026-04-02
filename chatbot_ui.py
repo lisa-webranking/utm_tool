@@ -1,4 +1,5 @@
-﻿import streamlit as st
+﻿import logging
+import streamlit as st
 import streamlit.components.v1 as components
 import re
 import json
@@ -10,6 +11,9 @@ from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 import google.generativeai as genai
 import ga4_mcp_tools  # Importa il modulo con i tool GA4
+from utm_normalize import sanitize_utm_value as _sanitize_utm_value
+
+logger = logging.getLogger(__name__)
 
 
 def _dedupe_repetitions(text: str) -> str:
@@ -122,20 +126,8 @@ def _normalize_destination_url(raw_url: str) -> str:
     return normalized
 
 
-def _sanitize_utm_value(value: str) -> str:
-    """
-    Normalizza i valori UTM:
-    - lowercase
-    - spazi -> underscore
-    - rimuove caratteri speciali (mantiene a-z0-9_-)
-    """
-    if value is None:
-        return ""
-    v = str(value).strip().lower()
-    v = v.replace(" ", "_")
-    v = re.sub(r"[^\w-]", "_", v)  # \w include underscore e numeri/lettere
-    v = re.sub(r"_+", "_", v).strip("_")
-    return v
+
+# _sanitize_utm_value imported from utm_normalize
 
 
 def _try_fix_date_to_ddmmyyyy(date_str: str) -> Optional[str]:
@@ -209,6 +201,7 @@ def _rebuild_url_with_encoded_query(url: str) -> str:
         encoded = urlencode(qs, doseq=True, safe="")  # encoda tutto ciò che serve
         return urlunparse((p.scheme, p.netloc, p.path, p.params, encoded, p.fragment))
     except Exception:
+        logger.debug("_rebuild_url_with_encoded_query: failed to re-encode URL, returning as-is")
         return url
 
 
@@ -654,7 +647,7 @@ def _update_context_from_response(raw_response: str, user_input: str, context: d
         context["current_step"] = new_step
 
     except Exception:
-        pass
+        logger.exception("_update_context_from_response: failed to extract context from response/input")
 
 
 def _enforce_guided_single_question(raw_text: str, context: dict) -> str:

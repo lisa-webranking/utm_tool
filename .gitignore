@@ -5,15 +5,26 @@ __pycache__/
 .venv
 venv/
 ENV/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.coverage
 
 # Streamlit
 .streamlit/
 
 # Google Auth & Sensitive Data
 token.json
+tokens/
 client_secrets.json
 api_keys.json
+utm_history.json
 .env
+.env*.local
+
+# OS
+.DS_Store
+Thumbs.db
 
 # IDEs
 .vscode/
