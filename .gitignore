@@ -26,6 +26,12 @@ utm_history.json
 .DS_Store
 Thumbs.db
 
+# Terraform (if ever used)
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+
 # IDEs
 .vscode/
 .idea/
