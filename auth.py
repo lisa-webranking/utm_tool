@@ -44,13 +44,20 @@ def build_oauth_flow(
     # Cloud Run mounts secrets to /secrets/oauth/client_secrets.json
     cloud_run_path = Path("/secrets/oauth/client_secrets.json")
 
+    # Check st.secrets safely (raises if secrets.toml doesn't exist)
+    def _has_secret(key: str) -> bool:
+        try:
+            return key in st.secrets
+        except Exception:
+            return False
+
     if secrets_path.exists():
         with open(secrets_path, "r") as f:
             client_config = json.load(f)
     elif cloud_run_path.exists():
         with open(cloud_run_path, "r") as f:
             client_config = json.load(f)
-    elif "google_oauth" in st.secrets:
+    elif _has_secret("google_oauth"):
         client_config = {"web": dict(st.secrets["google_oauth"])}
     else:
         return None
