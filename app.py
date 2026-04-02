@@ -70,8 +70,8 @@ TOKEN_FILE_PATH = _BASE_DIR / "token.json"
 UTM_HISTORY_FILE_PATH = _BASE_DIR / "utm_history.json"
 
 # --- Storage layer ---
-from storage import create_file_stores, _email_hash
-_history_store, _config_store, _cred_store = create_file_stores(_BASE_DIR)
+from storage import create_stores, _email_hash
+_history_store, _config_store, _cred_store = create_stores(_BASE_DIR)
 
 # --- CSS (loaded from file) ---
 _css_path = Path(__file__).with_name("styles") / "main.css"

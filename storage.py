@@ -384,6 +384,270 @@ class FileCredentialStore:
 
 
 # ---------------------------------------------------------------------------
+# PostgresStorage implementations
+# ---------------------------------------------------------------------------
+
+def _get_pg_connection(dsn: str):
+    """Create a psycopg2 connection. Caller must close it."""
+    import psycopg2
+    return psycopg2.connect(dsn)
+
+
+class PostgresUTMHistoryStore:
+    """UTM history backed by PostgreSQL."""
+
+    def __init__(self, dsn: str):
+        self._dsn = dsn
+
+    def load_all(self) -> list[dict]:
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT user_email, user_email_hash, client_id, property_id, "
+                    "property_name, final_url, utm_source, utm_medium, utm_campaign, "
+                    "campaign_name, live_date, expected_channel, tracking_status, created_at "
+                    "FROM utm_history ORDER BY created_at DESC"
+                )
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def load_for_user(self, user_email: str) -> list[dict]:
+        eh = _email_hash(user_email)
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT user_email, user_email_hash, client_id, property_id, "
+                    "property_name, final_url, utm_source, utm_medium, utm_campaign, "
+                    "campaign_name, live_date, expected_channel, tracking_status, created_at "
+                    "FROM utm_history WHERE user_email_hash = %s ORDER BY created_at DESC",
+                    (eh,),
+                )
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def upsert(self, entry: dict) -> None:
+        eh = _email_hash(entry.get("user_email", ""))
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO utm_history "
+                    "(user_email_hash, user_email, client_id, property_id, property_name, "
+                    " final_url, utm_source, utm_medium, utm_campaign, campaign_name, "
+                    " live_date, expected_channel, tracking_status, created_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
+                    "ON CONFLICT (user_email_hash, property_id, final_url) DO UPDATE SET "
+                    " utm_source=EXCLUDED.utm_source, utm_medium=EXCLUDED.utm_medium, "
+                    " utm_campaign=EXCLUDED.utm_campaign, campaign_name=EXCLUDED.campaign_name, "
+                    " live_date=EXCLUDED.live_date, expected_channel=EXCLUDED.expected_channel, "
+                    " tracking_status=EXCLUDED.tracking_status",
+                    (
+                        eh, entry.get("user_email", ""), entry.get("client_id", ""),
+                        entry.get("property_id", ""), entry.get("property_name", ""),
+                        entry.get("final_url", ""), entry.get("utm_source", ""),
+                        entry.get("utm_medium", ""), entry.get("utm_campaign", ""),
+                        entry.get("campaign_name", ""), entry.get("live_date", ""),
+                        entry.get("expected_channel_group", ""),
+                        entry.get("tracking_status", "pending"),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_for_user(self, user_email: str, final_url: str) -> None:
+        eh = _email_hash(user_email)
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM utm_history WHERE user_email_hash = %s AND final_url = %s",
+                    (eh, final_url),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+class PostgresClientConfigStore:
+    """Client configs backed by PostgreSQL JSONB."""
+
+    def __init__(self, dsn: str):
+        self._dsn = dsn
+
+    def load(self, client_id: str) -> Optional[dict]:
+        from utm_normalize import normalize_client_id
+        cid = normalize_client_id(client_id)
+        if not cid:
+            return None
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT config_json FROM client_configs WHERE client_id = %s", (cid,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                payload = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                try:
+                    _cfg, warnings = validate_client_config(payload)
+                    for w in warnings:
+                        logger.warning("Client config '%s': %s", cid, w)
+                except ClientConfigError as e:
+                    logger.error("Client config '%s' validation failed: %s", cid, e)
+                return payload
+        finally:
+            conn.close()
+
+    def save(self, client_id: str, payload: dict) -> None:
+        from utm_normalize import normalize_client_id
+        cid = normalize_client_id(client_id)
+        if not cid:
+            raise ValueError("client_id non valido")
+        body = dict(payload or {})
+        body["client_id"] = cid
+        validate_client_config(body)
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO client_configs (client_id, version, config_json, updated_at) "
+                    "VALUES (%s, %s, %s, NOW()) "
+                    "ON CONFLICT (client_id) DO UPDATE SET "
+                    " version = EXCLUDED.version, config_json = EXCLUDED.config_json, "
+                    " updated_at = NOW()",
+                    (cid, body.get("version", 1), json.dumps(body, ensure_ascii=False)),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_ids(self) -> list[str]:
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT client_id FROM client_configs ORDER BY client_id")
+                return [row[0] for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def delete(self, client_id: str) -> None:
+        from utm_normalize import normalize_client_id
+        cid = normalize_client_id(client_id)
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM client_configs WHERE client_id = %s", (cid,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+class PostgresCredentialStore:
+    """OAuth tokens and API keys backed by PostgreSQL."""
+
+    def __init__(self, dsn: str):
+        self._dsn = dsn
+
+    def _ensure_user(self, cur, user_email: str) -> int:
+        """Get or create user row, return user_id."""
+        eh = _email_hash(user_email)
+        cur.execute("SELECT id FROM users WHERE email_hash = %s", (eh,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+        cur.execute(
+            "INSERT INTO users (email_hash) VALUES (%s) RETURNING id", (eh,)
+        )
+        return cur.fetchone()[0]
+
+    def save_token(self, user_email: str, creds_json: str) -> None:
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                uid = self._ensure_user(cur, user_email)
+                cur.execute(
+                    "INSERT INTO credentials (user_id, provider, token_json, updated_at) "
+                    "VALUES (%s, 'google', %s, NOW()) "
+                    "ON CONFLICT (user_id, provider) DO UPDATE SET "
+                    " token_json = EXCLUDED.token_json, updated_at = NOW()",
+                    (uid, creds_json),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def load_token(self, user_email: str) -> Optional[str]:
+        eh = _email_hash(user_email)
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT c.token_json FROM credentials c "
+                    "JOIN users u ON c.user_id = u.id "
+                    "WHERE u.email_hash = %s AND c.provider = 'google'",
+                    (eh,),
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+        finally:
+            conn.close()
+
+    def delete_token(self, user_email: str) -> None:
+        eh = _email_hash(user_email)
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM credentials WHERE user_id IN "
+                    "(SELECT id FROM users WHERE email_hash = %s) AND provider = 'google'",
+                    (eh,),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def save_api_key(self, user_email: str, service: str, key: str) -> None:
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                uid = self._ensure_user(cur, user_email)
+                cur.execute(
+                    "INSERT INTO api_keys (user_id, service, encrypted_key, updated_at) "
+                    "VALUES (%s, %s, %s, NOW()) "
+                    "ON CONFLICT (user_id, service) DO UPDATE SET "
+                    " encrypted_key = EXCLUDED.encrypted_key, updated_at = NOW()",
+                    (uid, service, key),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def load_api_key(self, user_email: str, service: str) -> Optional[str]:
+        eh = _email_hash(user_email)
+        conn = _get_pg_connection(self._dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT a.encrypted_key FROM api_keys a "
+                    "JOIN users u ON a.user_id = u.id "
+                    "WHERE u.email_hash = %s AND a.service = %s",
+                    (eh, service),
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Factory — single point to get all stores
 # ---------------------------------------------------------------------------
 
@@ -399,3 +663,28 @@ def create_file_stores(base_dir: Path) -> tuple[
             api_keys_path=base_dir / "api_keys.json",
         ),
     )
+
+
+def create_postgres_stores(dsn: str) -> tuple[
+    PostgresUTMHistoryStore, PostgresClientConfigStore, PostgresCredentialStore
+]:
+    """Create all PostgreSQL-backed stores."""
+    return (
+        PostgresUTMHistoryStore(dsn),
+        PostgresClientConfigStore(dsn),
+        PostgresCredentialStore(dsn),
+    )
+
+
+def create_stores(base_dir: Path):
+    """Auto-select storage backend based on DATABASE_URL env var.
+
+    If DATABASE_URL is set, uses PostgreSQL. Otherwise, uses local JSON files.
+    """
+    import os
+    dsn = os.environ.get("DATABASE_URL", "").strip()
+    if dsn:
+        logger.info("Using PostgreSQL storage backend")
+        return create_postgres_stores(dsn)
+    logger.info("Using file-based storage backend")
+    return create_file_stores(base_dir)
