@@ -132,92 +132,18 @@ def get_source_medium_pairs(property_id, creds):
         return []
 
 
-GUIDE_TABLE_DATA = [
-    {"Traffic type": "Organic", "utm_medium": "organic", "utm_source": "google, bing, yahoo"},
-    {"Traffic type": "Referral", "utm_medium": "referral", "utm_source": "(domain)"},
-    {"Traffic type": "Direct", "utm_medium": "(none)", "utm_source": "(direct)"},
-    {"Traffic type": "Paid Search", "utm_medium": "cpc", "utm_source": "google, bing"},
-    {"Traffic type": "Affiliate", "utm_medium": "affiliate", "utm_source": "tradetracker, awin"},
-    {"Traffic type": "Display", "utm_medium": "cpm", "utm_source": "reservation, display, dv360, google"},
-    {"Traffic type": "Video", "utm_medium": "cpv", "utm_source": "youtube, vimeo, google"},
-    {"Traffic type": "Programmatic", "utm_medium": "cpm", "utm_source": "rcs, mediamond, rai, manzoni"},
-    {"Traffic type": "Email", "utm_medium": "email|mailing_campaign", "utm_source": "newsletter, email, crm, sfmc, mailchimp"},
-    {"Traffic type": "Organic Social", "utm_medium": "social_org", "utm_source": "facebook, instagram, tiktok, linkedin, pinterest"},
-    {"Traffic type": "Paid Social", "utm_medium": "social_paid", "utm_source": "facebook, instagram, tiktok, linkedin, pinterest"},
-    {"Traffic type": "App traffic", "utm_medium": "-", "utm_source": "app"},
-    {"Traffic type": "SMS", "utm_medium": "offline", "utm_source": "sms"},
-    {"Traffic type": "Altro", "utm_medium": "other", "utm_source": ""},
-]
-
 # --- UTILS ---
-def get_source_options():
-    sources = set()
-    for row in GUIDE_TABLE_DATA:
-        parts = row["utm_source"].split(",")
-        for p in parts:
-            clean = p.strip().replace("...", "")
-            if clean and "(" not in clean and "[" not in clean:
-                sources.add(clean)
-    return [""] + sorted(list(sources)) + ["Altro (Inserisci manuale)"]
 
-SOURCE_OPTIONS = get_source_options()
-
-def get_compatible_channels(selected_source, all_client_channels):
-    if not selected_source or selected_source == "Altro (Inserisci manuale)":
-        return [""] + all_client_channels
-    norm_source = selected_source.strip().lower()
-    compatible_types = set()
-    for row in GUIDE_TABLE_DATA:
-        row_sources = [s.strip().lower() for s in row["utm_source"].split(",")]
-        if norm_source in row_sources:
-            compatible_types.add(row["Traffic type"])
-    if not compatible_types:
-        return [""] + all_client_channels
-    filtered_channels = [c for c in all_client_channels if c in compatible_types]
-    return [""] + sorted(filtered_channels) if filtered_channels else [""] + all_client_channels
-
-
-def filter_options_by_source_mode(options, mode, field):
-    """Filter source/medium options according to selected traffic source mode preserving input priority order."""
-    if field == "medium":
-        raw_tokens = [normalize_medium_token(o) for o in options if normalize_medium_token(o)]
-    else:
-        raw_tokens = [normalize_token(o) for o in options if normalize_token(o)]
-
-    # Dedup preserving order
+def _dedup_tokens(options, normalizer):
+    """Deduplicate and normalize a list of option strings, preserving order."""
     tokens = []
     seen = set()
-    for tok in raw_tokens:
-        if tok not in seen:
+    for raw in options or []:
+        tok = normalizer(raw)
+        if tok and tok not in seen:
             tokens.append(tok)
             seen.add(tok)
-
-    if mode in {"Custom values", "Custom"}:
-        return tokens
-
-    if field == "source":
-        source_map = {
-            "Paid": ["google", "bing", "adwords", "googleads", "facebook", "instagram", "tiktok", "linkedin", "meta"],
-            "Email": ["email", "newsletter", "crm", "mailchimp", "sfmc"],
-            "SMS": ["sms", "whatsapp", "messenger"],
-            "Google Ads": ["google", "adwords", "googleads", "bing"],
-            "Google": ["google", "adwords", "googleads", "bing"],
-            "Social": ["facebook", "instagram", "tiktok", "linkedin", "pinterest", "social", "meta", "twitter", "x"],
-        }
-        hints = source_map.get(mode, [])
-    else:
-        medium_map = {
-            "Paid": ["cpc", "ppc", "sem", "paid_search", "paid-search", "cpm", "cpv", "social_paid", "paid_social", "paid-social"],
-            "Email": ["email", "mailing_campaign", "newsletter", "mail"],
-            "SMS": ["sms"],
-            "Google Ads": ["cpc", "ppc", "paid-search", "paid_search", "sem"],
-            "Google": ["cpc", "ppc", "paid-search", "paid_search", "sem"],
-            "Social": ["social", "social_paid", "social_org", "paid-social", "organic-social", "organic_social", "paid_social"],
-        }
-        hints = medium_map.get(mode, [])
-
-    filtered = [tok for tok in tokens if any(h in tok for h in hints)]
-    return filtered
+    return tokens
 
 
 
@@ -1184,8 +1110,6 @@ def show_dashboard():
                                         source_medium_map[src_n].append(med_n)
                                         source_medium_seen[src_n].add(med_n)
                             if real_sources:
-                                global SOURCE_OPTIONS
-                                SOURCE_OPTIONS = sorted(list(set(get_source_options() + real_sources)))
                                 preview = ", ".join(real_sources[:6])
                                 st.markdown(f'<div class="tilda-note">Sorgenti recenti da GA4: {html_lib.escape(preview)}</div>', unsafe_allow_html=True)
                             if real_mediums:
@@ -1281,19 +1205,8 @@ def show_dashboard():
     
                 source_default = ""
                 medium_default = ""
-                if source_mode == "Google":
-                    source_default = "google"
-                    medium_default = "cpc"
-                elif source_mode == "Social":
-                    source_default = "facebook"
-                    medium_default = "social_paid"
-                elif source_mode == "Email":
-                    source_default = "newsletter"
-                    medium_default = "email"
-                elif source_mode == "SMS":
-                    source_default = "sms"
-                    medium_default = "sms"
-    
+
+                # Defaults come only from client config — no hardcoded values
                 if active_client_config:
                     if client_rule_sources:
                         source_default = normalize_token(client_rule_sources[0])
@@ -1317,14 +1230,10 @@ def show_dashboard():
                             normalize_token,
                         )
                         normalized_sources = list(client_sources_ordered) + [s for s in ga4_sources_ordered if s not in set(client_sources_ordered)]
-                        if not normalized_sources and not selected_prop_name:
-                            normalized_sources = [normalize_token(s) for s in get_source_options() if normalize_token(s) and "altro" not in s.lower()]
 
-                        source_options = filter_options_by_source_mode(normalized_sources, source_mode, "source")
-                        if not source_options:
-                            source_options = normalized_sources
-                        if not source_options:
-                            source_options = [normalize_token(source_default)] if normalize_token(source_default) else []
+                        source_options = _dedup_tokens(normalized_sources, normalize_token)
+                        if not source_options and normalize_token(source_default):
+                            source_options = [normalize_token(source_default)]
 
                         if not is_locked_client_view:
                             source_options = source_options + ["manuale"]
@@ -1376,11 +1285,6 @@ def show_dashboard():
                         )
 
                         normalized_mediums = list(client_mediums_ordered) + [m for m in ga4_mediums_ordered if m not in set(client_mediums_ordered)]
-                        if not normalized_mediums and not selected_prop_name:
-                            fallback_mediums = []
-                            for row in GUIDE_TABLE_DATA:
-                                fallback_mediums.extend([normalize_medium_token(x) for x in str(row.get("utm_medium", "")).replace("|", ",").split(",") if normalize_medium_token(x)])
-                            normalized_mediums = list(dict.fromkeys(fallback_mediums))
 
                         selected_source_normalized = normalize_token(utm_source) if 'utm_source' in locals() else ""
                         mapped_mediums = source_medium_map.get(selected_source_normalized, [])
@@ -1395,9 +1299,7 @@ def show_dashboard():
                             if med not in merged_for_source:
                                 merged_for_source.append(med)
 
-                        medium_options = filter_options_by_source_mode(merged_for_source or normalized_mediums, source_mode, "medium")
-                        if not medium_options:
-                            medium_options = merged_for_source or normalized_mediums
+                        medium_options = _dedup_tokens(merged_for_source or normalized_mediums, normalize_medium_token)
                         if not medium_options:
                             medium_options = [normalize_medium_token(medium_default)] if normalize_medium_token(medium_default) else []
 
