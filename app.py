@@ -45,7 +45,7 @@ from client_rules import (
     build_placeholder_examples, extract_client_campaign_rule_notes,
     extract_client_medium_source_map, order_by_ga4_priority,
     validate_campaign_value_against_client_rules, audit_ga4_campaign_entry,
-    get_last_full_week_range, is_monday,
+    get_last_full_week_range, is_monday, build_client_rules_text,
 )
 import ga4_service
 
@@ -262,45 +262,6 @@ def _split_rule_values(value: str) -> list:
 
 
 
-def build_client_rules_text_for_chatbot(client_config: dict) -> str:
-    if not client_config:
-        return ""
-    cid = normalize_client_id(client_config.get("client_id", ""))
-    sources, mediums, campaign_types = extract_client_rule_values(client_config)
-    medium_source_map = extract_client_medium_source_map(client_config)
-    campaign_rule_notes, campaign_examples = extract_client_campaign_rule_notes(client_config)
-    lines = [f"- client_id: {cid}"] if cid else []
-    cfg_version = int(client_config.get("version", 0) or 0)
-    updated_at = str(client_config.get("updated_at", "")).strip()
-    source_sha = str(client_config.get("source_file_sha256", "")).strip()
-    source_file_name = str(client_config.get("source_file_name", "")).strip()
-    if cfg_version:
-        lines.append(f"- config_version: {cfg_version}")
-    if updated_at:
-        lines.append(f"- config_updated_at: {updated_at}")
-    if source_file_name:
-        lines.append(f"- source_file_name: {source_file_name}")
-    if source_sha:
-        lines.append(f"- source_file_sha256: {source_sha}")
-    ga4_name = str(client_config.get("ga4_client_name", "")).strip()
-    if ga4_name:
-        lines.append(f"- cliente GA4: {ga4_name}")
-    if sources:
-        lines.append(f"- utm_source consentiti (esempi): {', '.join(sources[:20])}")
-    if mediums:
-        lines.append(f"- utm_medium consentiti (esempi): {', '.join(mediums[:20])}")
-    if campaign_types:
-        lines.append(f"- campaign_type usati: {', '.join(campaign_types[:20])}")
-    for medium, allowed_sources in medium_source_map.items():
-        lines.append(f"- mapping utm_source per utm_medium={medium}: {', '.join(allowed_sources)}")
-    for note in campaign_rule_notes:
-        lines.append(f"- regola utm_campaign cliente: {note}")
-    if campaign_examples:
-        lines.append(f"- esempi utm_campaign cliente: {', '.join(campaign_examples)}")
-    if any("brandcountry" in note.lower() for note in campaign_rule_notes):
-        lines.append("- Se la regola cliente usa brandcountry come primo token, mantieni quel token e non sostituirlo con country o country-lingua.")
-    lines.append("- Evita valori fuori convenzione cliente se non esplicitamente richiesti.")
-    return "\n".join(lines)
 def resolve_locked_client_context(locked_client_id: str):
     locked_cid = normalize_client_id(locked_client_id)
     if not locked_cid:
@@ -831,7 +792,7 @@ def show_dashboard():
         active_client_id, active_client_config, lock_resolution_note = resolve_locked_client_context(selected_builder_client_id)
     st.session_state["active_client_id"] = active_client_id or ""
     st.session_state["active_client_config"] = active_client_config
-    st.session_state["active_client_rules_text"] = build_client_rules_text_for_chatbot(active_client_config)
+    st.session_state["active_client_rules_text"] = build_client_rules_text(active_client_config)
 
     if active_client_id:
         if active_client_config:

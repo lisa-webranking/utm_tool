@@ -103,40 +103,46 @@ class ClientConfigError(ValueError):
 
 
 @dataclass
-class PropertyConfig:
-    default_country: str = ""
-    expected_domain: str = ""
-
-
-@dataclass
 class ClientConfig:
-    """Validated client config. Required: client_id, version, rules_rows."""
+    """Relational client config — no JSON blobs.
+
+    Arrays (sources, mediums, etc.) are stored as TEXT[] in PostgreSQL
+    or as JSON lists in the file-based fallback.
+    The medium→source mapping is a separate table / nested dict.
+    """
 
     client_id: str = ""
     version: int = 1
-    rules_rows: list[dict[str, Any]] = field(default_factory=list)
-    created_at: str = ""
-    updated_at: str = ""
-    updated_by: str = ""
-    source_file_name: str = ""
-    source_file_sha256: str = ""
-    # Optional GA4 fields
-    ga4_client_name: str = ""
+    # GA4 link
     ga4_property_id: str = ""
     ga4_property_name: str = ""
-    property_config: Optional[PropertyConfig] = None
-    # Shared link fields
+    ga4_client_name: str = ""
+    # Defaults
+    default_country: str = ""
+    expected_domain: str = ""
+    # Allowed UTM values
+    sources: list[str] = field(default_factory=list)
+    mediums: list[str] = field(default_factory=list)
+    campaign_types: list[str] = field(default_factory=list)
+    # Campaign naming rules
+    campaign_notes: list[str] = field(default_factory=list)
+    campaign_examples: list[str] = field(default_factory=list)
+    # Medium → source mapping (dict of medium → list of sources)
+    medium_source_map: dict[str, list[str]] = field(default_factory=dict)
+    # Shared link
     shared_link: str = ""
     shared_base_url: str = ""
-    shared_link_updated_at: str = ""
-    shared_link_updated_by: str = ""
-    # Counters
-    last_added_rows_count: int = 0
-    total_rows_count: int = 0
+    # Upload tracking
+    source_file_name: str = ""
+    source_file_sha256: str = ""
+    # Audit
+    updated_by: str = ""
+    created_at: str = ""
+    updated_at: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> "ClientConfig":
-        """Parse and validate a raw dict. Raises ClientConfigError on problems."""
+        """Parse and validate a raw dict. Raises ClientConfigError on fatal issues."""
         if not isinstance(data, dict):
             raise ClientConfigError("Il config non è un dizionario valido")
 
@@ -150,44 +156,71 @@ class ClientConfig:
         except (TypeError, ValueError):
             raise ClientConfigError(f"'version' deve essere un intero, ricevuto: {version!r}")
 
-        rules_rows = data.get("rules_rows")
-        if rules_rows is not None and not isinstance(rules_rows, list):
-            raise ClientConfigError("'rules_rows' deve essere una lista")
+        def _str_list(val) -> list[str]:
+            if isinstance(val, list):
+                return [str(v) for v in val if str(v).strip()]
+            return []
 
-        prop_cfg = data.get("property_config")
-        pc = None
-        if isinstance(prop_cfg, dict):
-            pc = PropertyConfig(
-                default_country=str(prop_cfg.get("default_country", "")),
-                expected_domain=str(prop_cfg.get("expected_domain", "")),
-            )
+        msm_raw = data.get("medium_source_map", {})
+        msm = {}
+        if isinstance(msm_raw, dict):
+            for k, v in msm_raw.items():
+                msm[str(k)] = _str_list(v) if isinstance(v, list) else []
 
         return cls(
             client_id=cid,
             version=version,
-            rules_rows=rules_rows or [],
-            created_at=str(data.get("created_at", "")),
-            updated_at=str(data.get("updated_at", "")),
-            updated_by=str(data.get("updated_by", "")),
-            source_file_name=str(data.get("source_file_name", "")),
-            source_file_sha256=str(data.get("source_file_sha256", "")),
-            ga4_client_name=str(data.get("ga4_client_name", "")),
             ga4_property_id=str(data.get("ga4_property_id", "")),
             ga4_property_name=str(data.get("ga4_property_name", "")),
-            property_config=pc,
+            ga4_client_name=str(data.get("ga4_client_name", "")),
+            default_country=str(data.get("default_country", "")),
+            expected_domain=str(data.get("expected_domain", "")),
+            sources=_str_list(data.get("sources")),
+            mediums=_str_list(data.get("mediums")),
+            campaign_types=_str_list(data.get("campaign_types")),
+            campaign_notes=_str_list(data.get("campaign_notes")),
+            campaign_examples=_str_list(data.get("campaign_examples")),
+            medium_source_map=msm,
             shared_link=str(data.get("shared_link", "")),
             shared_base_url=str(data.get("shared_base_url", "")),
-            shared_link_updated_at=str(data.get("shared_link_updated_at", "")),
-            shared_link_updated_by=str(data.get("shared_link_updated_by", "")),
-            last_added_rows_count=int(data.get("last_added_rows_count", 0) or 0),
-            total_rows_count=int(data.get("total_rows_count", 0) or 0),
+            source_file_name=str(data.get("source_file_name", "")),
+            source_file_sha256=str(data.get("source_file_sha256", "")),
+            updated_by=str(data.get("updated_by", "")),
+            created_at=str(data.get("created_at", "")),
+            updated_at=str(data.get("updated_at", "")),
         )
+
+    def to_dict(self) -> dict:
+        """Serialize to a plain dict (for FileStorage JSON or API responses)."""
+        d = {
+            "client_id": self.client_id,
+            "version": self.version,
+            "ga4_property_id": self.ga4_property_id,
+            "ga4_property_name": self.ga4_property_name,
+            "ga4_client_name": self.ga4_client_name,
+            "default_country": self.default_country,
+            "expected_domain": self.expected_domain,
+            "sources": self.sources,
+            "mediums": self.mediums,
+            "campaign_types": self.campaign_types,
+            "campaign_notes": self.campaign_notes,
+            "campaign_examples": self.campaign_examples,
+            "medium_source_map": self.medium_source_map,
+            "shared_link": self.shared_link,
+            "shared_base_url": self.shared_base_url,
+            "source_file_name": self.source_file_name,
+            "source_file_sha256": self.source_file_sha256,
+            "updated_by": self.updated_by,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+        return d
 
     def validate(self) -> list[str]:
         """Return list of warning strings (non-fatal issues)."""
         warnings = []
-        if not self.rules_rows:
-            warnings.append("rules_rows è vuoto — il chatbot non avrà regole cliente")
+        if not self.sources and not self.mediums:
+            warnings.append("Nessun source o medium definito — il builder mostrerà solo input manuale")
         if self.version < 1:
             warnings.append(f"version={self.version} sembra invalido (atteso >= 1)")
         return warnings
@@ -525,7 +558,7 @@ class PostgresUTMHistoryStore:
 
 
 class PostgresClientConfigStore:
-    """Client configs backed by PostgreSQL JSONB."""
+    """Client configs backed by relational PostgreSQL tables (no JSON blobs)."""
 
     def __init__(self, dsn: str):
         self._dsn = dsn
@@ -539,19 +572,38 @@ class PostgresClientConfigStore:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT config_json FROM client_configs WHERE client_id = %s", (cid,)
+                    "SELECT client_id, version, ga4_property_id, ga4_property_name, "
+                    "ga4_client_name, default_country, expected_domain, "
+                    "sources, mediums, campaign_types, campaign_notes, campaign_examples, "
+                    "shared_link, shared_base_url, source_file_name, source_file_sha256, "
+                    "updated_by, created_at, updated_at "
+                    "FROM client_configs WHERE client_id = %s",
+                    (cid,),
                 )
                 row = cur.fetchone()
                 if not row:
                     return None
-                payload = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-                try:
-                    _cfg, warnings = validate_client_config(payload)
-                    for w in warnings:
-                        logger.warning("Client config '%s': %s", cid, w)
-                except ClientConfigError as e:
-                    logger.error("Client config '%s' validation failed: %s", cid, e)
-                return payload
+                cols = [d[0] for d in cur.description]
+                data = dict(zip(cols, row))
+                # Convert psycopg2 arrays to Python lists
+                for arr_col in ("sources", "mediums", "campaign_types", "campaign_notes", "campaign_examples"):
+                    data[arr_col] = list(data.get(arr_col) or [])
+                # Convert timestamps to strings
+                for ts_col in ("created_at", "updated_at"):
+                    if data.get(ts_col):
+                        data[ts_col] = str(data[ts_col])
+
+                # Load medium→source mapping from separate table
+                cur.execute(
+                    "SELECT medium, source FROM client_medium_source_map WHERE client_id = %s",
+                    (cid,),
+                )
+                msm: dict[str, list[str]] = {}
+                for m, s in cur.fetchall():
+                    msm.setdefault(m, []).append(s)
+                data["medium_source_map"] = msm
+
+                return data
         finally:
             _put_pg_connection(conn)
 
@@ -562,18 +614,45 @@ class PostgresClientConfigStore:
             raise ValueError("client_id non valido")
         body = dict(payload or {})
         body["client_id"] = cid
-        validate_client_config(body)
+        cfg, _ = validate_client_config(body)
+
         conn = _get_pg_connection(self._dsn)
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO client_configs (client_id, version, config_json, updated_at) "
-                    "VALUES (%s, %s, %s, NOW()) "
+                    "INSERT INTO client_configs "
+                    "(client_id, version, ga4_property_id, ga4_property_name, ga4_client_name, "
+                    " default_country, expected_domain, sources, mediums, campaign_types, "
+                    " campaign_notes, campaign_examples, shared_link, shared_base_url, "
+                    " source_file_name, source_file_sha256, updated_by, updated_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
                     "ON CONFLICT (client_id) DO UPDATE SET "
-                    " version = EXCLUDED.version, config_json = EXCLUDED.config_json, "
-                    " updated_at = NOW()",
-                    (cid, body.get("version", 1), json.dumps(body, ensure_ascii=False)),
+                    " version=EXCLUDED.version, ga4_property_id=EXCLUDED.ga4_property_id, "
+                    " ga4_property_name=EXCLUDED.ga4_property_name, ga4_client_name=EXCLUDED.ga4_client_name, "
+                    " default_country=EXCLUDED.default_country, expected_domain=EXCLUDED.expected_domain, "
+                    " sources=EXCLUDED.sources, mediums=EXCLUDED.mediums, campaign_types=EXCLUDED.campaign_types, "
+                    " campaign_notes=EXCLUDED.campaign_notes, campaign_examples=EXCLUDED.campaign_examples, "
+                    " shared_link=EXCLUDED.shared_link, shared_base_url=EXCLUDED.shared_base_url, "
+                    " source_file_name=EXCLUDED.source_file_name, source_file_sha256=EXCLUDED.source_file_sha256, "
+                    " updated_by=EXCLUDED.updated_by, updated_at=NOW()",
+                    (
+                        cid, cfg.version, cfg.ga4_property_id, cfg.ga4_property_name,
+                        cfg.ga4_client_name, cfg.default_country, cfg.expected_domain,
+                        cfg.sources, cfg.mediums, cfg.campaign_types,
+                        cfg.campaign_notes, cfg.campaign_examples,
+                        cfg.shared_link, cfg.shared_base_url,
+                        cfg.source_file_name, cfg.source_file_sha256, cfg.updated_by,
+                    ),
                 )
+                # Replace medium→source mapping
+                cur.execute("DELETE FROM client_medium_source_map WHERE client_id = %s", (cid,))
+                for medium, sources_list in cfg.medium_source_map.items():
+                    for source in sources_list:
+                        cur.execute(
+                            "INSERT INTO client_medium_source_map (client_id, medium, source) "
+                            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                            (cid, medium, source),
+                        )
             conn.commit()
         finally:
             _put_pg_connection(conn)
@@ -593,6 +672,7 @@ class PostgresClientConfigStore:
         conn = _get_pg_connection(self._dsn)
         try:
             with conn.cursor() as cur:
+                # CASCADE deletes medium_source_map rows
                 cur.execute("DELETE FROM client_configs WHERE client_id = %s", (cid,))
             conn.commit()
         finally:

@@ -24,11 +24,39 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 
 CREATE TABLE IF NOT EXISTS client_configs (
-    client_id     VARCHAR(128) PRIMARY KEY,
-    version       INT NOT NULL DEFAULT 1,
-    config_json   JSONB NOT NULL,
-    created_at    TIMESTAMPTZ DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ DEFAULT NOW()
+    client_id           VARCHAR(128) PRIMARY KEY,
+    version             INT NOT NULL DEFAULT 1,
+    -- GA4 link
+    ga4_property_id     VARCHAR(64) DEFAULT '',
+    ga4_property_name   VARCHAR(255) DEFAULT '',
+    ga4_client_name     VARCHAR(255) DEFAULT '',
+    -- Defaults
+    default_country     VARCHAR(8) DEFAULT '',
+    expected_domain     VARCHAR(255) DEFAULT '',
+    -- Allowed UTM values (PostgreSQL arrays, NOT JSON)
+    sources             TEXT[] NOT NULL DEFAULT '{}',
+    mediums             TEXT[] NOT NULL DEFAULT '{}',
+    campaign_types      TEXT[] NOT NULL DEFAULT '{}',
+    -- Campaign naming rules
+    campaign_notes      TEXT[] NOT NULL DEFAULT '{}',
+    campaign_examples   TEXT[] NOT NULL DEFAULT '{}',
+    -- Shared link
+    shared_link         TEXT DEFAULT '',
+    shared_base_url     TEXT DEFAULT '',
+    -- Upload tracking
+    source_file_name    VARCHAR(255) DEFAULT '',
+    source_file_sha256  VARCHAR(64) DEFAULT '',
+    -- Audit
+    updated_by          VARCHAR(255) DEFAULT '',
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS client_medium_source_map (
+    client_id   VARCHAR(128) REFERENCES client_configs(client_id) ON DELETE CASCADE,
+    medium      VARCHAR(255) NOT NULL,
+    source      VARCHAR(255) NOT NULL,
+    PRIMARY KEY (client_id, medium, source)
 );
 
 CREATE TABLE IF NOT EXISTS utm_history (
