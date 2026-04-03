@@ -8,6 +8,15 @@ import re
 from datetime import datetime, timedelta
 from utm_normalize import normalize_token, normalize_medium_token
 
+
+def _split_rule_values(value: str) -> list:
+    """Split a rule cell value by comma, pipe, semicolon, or slash."""
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    return [x.strip() for x in re.split(r"[,\|;/]+", raw) if str(x).strip()]
+
+
 def order_by_ga4_priority(options, ga4_priority, normalizer):
     """Order options by GA4 popularity (sessions) first, then alphabetical fallback."""
     values = []
