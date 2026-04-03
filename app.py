@@ -36,6 +36,7 @@ from utm_normalize import (
     normalize_token, normalize_medium_token, normalize_client_id,
     suggest_naming_value, validate_naming_rules,
 )
+from excel_parser import parse_excel_to_client_config
 
 # Import new Chatbot UI
 from chatbot_ui import render_chatbot_interface
@@ -1821,14 +1822,21 @@ def show_dashboard():
 
         if selected_cfg != "Nuova configurazione" and st.session_state.cfg_form_loaded_client != selected_cfg:
             cfg = load_client_config(selected_cfg) or {}
-            prop_cfg = cfg.get("property_config") if isinstance(cfg.get("property_config"), dict) else {}
             st.session_state.cfg_client_id_input = str(cfg.get("client_id", selected_cfg))
             st.session_state.cfg_ga4_client_name = str(cfg.get("ga4_client_name", ""))
             st.session_state.cfg_ga4_property_id = str(cfg.get("ga4_property_id", ""))
             st.session_state.cfg_ga4_property_name = str(cfg.get("ga4_property_name", ""))
-            st.session_state.cfg_expected_domain = str(prop_cfg.get("expected_domain", ""))
-            st.session_state.cfg_default_country = str(prop_cfg.get("default_country", "it") or "it")
-            st.session_state.cfg_rules_rows = list(cfg.get("rules_rows", []) or [])
+            st.session_state.cfg_expected_domain = str(cfg.get("expected_domain", ""))
+            st.session_state.cfg_default_country = str(cfg.get("default_country", "it") or "it")
+            st.session_state.cfg_extracted = {
+                "sources": cfg.get("sources", []),
+                "mediums": cfg.get("mediums", []),
+                "campaign_types": cfg.get("campaign_types", []),
+                "campaign_notes": cfg.get("campaign_notes", []),
+                "campaign_examples": cfg.get("campaign_examples", []),
+                "medium_source_map": cfg.get("medium_source_map", {}),
+            }
+            st.session_state.cfg_rules_rows = []  # no raw rows in new schema
             st.session_state.cfg_rules_file_name = str(cfg.get("source_file_name", ""))
             st.session_state.cfg_rules_file_sha256 = str(cfg.get("source_file_sha256", ""))
             st.session_state.cfg_form_loaded_client = selected_cfg
@@ -1841,6 +1849,7 @@ def show_dashboard():
             st.session_state.cfg_ga4_property_name = ""
             st.session_state.cfg_expected_domain = ""
             st.session_state.cfg_default_country = "it"
+            st.session_state.cfg_extracted = {}
             st.session_state.cfg_rules_rows = []
             st.session_state.cfg_rules_file_name = ""
             st.session_state.cfg_rules_file_sha256 = ""
@@ -1908,20 +1917,27 @@ def show_dashboard():
             if uploaded_sha != st.session_state.get("cfg_rules_file_sha256", ""):
                 try:
                     parsed_rows = parse_rules_rows_from_uploaded_file(uploaded_rules_file.name, uploaded_bytes)
-                    st.session_state.cfg_rules_rows = parsed_rows
+                    extracted = parse_excel_to_client_config(parsed_rows)
+                    st.session_state.cfg_extracted = extracted
+                    st.session_state.cfg_rules_rows = parsed_rows  # keep for preview only
                     st.session_state.cfg_rules_file_name = str(uploaded_rules_file.name)
                     st.session_state.cfg_rules_file_sha256 = uploaded_sha
-                    st.success(f"File caricato: {uploaded_rules_file.name} ({len(parsed_rows)} righe)")
+                    st.success(f"File caricato: {uploaded_rules_file.name} — "
+                               f"{len(extracted.get('sources', []))} source, "
+                               f"{len(extracted.get('mediums', []))} medium, "
+                               f"{len(extracted.get('campaign_types', []))} campaign type estratti")
                 except Exception as e:
                     st.error(f"Errore lettura file UTM Builder: {e}")
         elif st.session_state.get("cfg_rules_file_name"):
             st.caption(f"File regole corrente: {st.session_state.get('cfg_rules_file_name')}")
 
-        rules_preview_cfg = {"rules_rows": st.session_state.get("cfg_rules_rows", [])}
-        prev_sources, prev_mediums, prev_campaign_types = extract_client_rule_values(rules_preview_cfg)
-        st.caption(
-            f"Regole estratte: source={len(prev_sources)} | medium={len(prev_mediums)} | campaign_type={len(prev_campaign_types)}"
-        )
+        _ext = st.session_state.get("cfg_extracted", {})
+        if _ext:
+            st.caption(
+                f"Regole estratte: source={len(_ext.get('sources', []))} | "
+                f"medium={len(_ext.get('mediums', []))} | "
+                f"campaign_type={len(_ext.get('campaign_types', []))}"
+            )
 
         current_rows = st.session_state.get("cfg_rules_rows", []) or []
         if current_rows:
@@ -2032,6 +2048,7 @@ def show_dashboard():
                     sig = sign_client_id(cid)
                     shared_link = f"{base_url}/?client_id={cid}&sig={sig}"
 
+                extracted = st.session_state.get("cfg_extracted", {})
                 payload = dict(existing_cfg)
                 payload.update(
                     {
@@ -2044,11 +2061,15 @@ def show_dashboard():
                         "ga4_client_name": str(st.session_state.get("cfg_ga4_client_name", "")).strip(),
                         "ga4_property_name": str(st.session_state.get("cfg_ga4_property_name", "")).strip(),
                         "ga4_property_id": str(st.session_state.get("cfg_ga4_property_id", "")).strip(),
-                        "property_config": {
-                            "default_country": normalize_token(st.session_state.get("cfg_default_country", "")) or "it",
-                            "expected_domain": str(st.session_state.get("cfg_expected_domain", "")).strip().lower(),
-                        },
-                        "rules_rows": list(st.session_state.get("cfg_rules_rows", []) or existing_cfg.get("rules_rows", []) or []),
+                        "default_country": normalize_token(st.session_state.get("cfg_default_country", "")) or "it",
+                        "expected_domain": str(st.session_state.get("cfg_expected_domain", "")).strip().lower(),
+                        # Structured data from Excel parsing (no JSON blob)
+                        "sources": extracted.get("sources", existing_cfg.get("sources", [])),
+                        "mediums": extracted.get("mediums", existing_cfg.get("mediums", [])),
+                        "campaign_types": extracted.get("campaign_types", existing_cfg.get("campaign_types", [])),
+                        "campaign_notes": extracted.get("campaign_notes", existing_cfg.get("campaign_notes", [])),
+                        "campaign_examples": extracted.get("campaign_examples", existing_cfg.get("campaign_examples", [])),
+                        "medium_source_map": extracted.get("medium_source_map", existing_cfg.get("medium_source_map", {})),
                         "shared_link": shared_link,
                         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     }
