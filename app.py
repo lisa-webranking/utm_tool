@@ -1135,40 +1135,10 @@ def show_dashboard():
                     </ul>
                 </details>
                 """, unsafe_allow_html=True)
-                mode_options = ["Social", "Google", "Email", "SMS", "Custom"]
-                default_mode = "Custom"
-                if client_rule_sources or client_rule_mediums:
-                    sample_src = (client_rule_sources[0] if client_rule_sources else "")
-                    sample_med = (client_rule_mediums[0] if client_rule_mediums else "")
-                    src_join = f"{sample_src} {sample_med}".lower()
-                    if any(k in src_join for k in ["google", "adwords", "googleads", "cpc", "ppc", "sem"]):
-                        default_mode = "Google"
-                    elif any(k in src_join for k in ["facebook", "instagram", "tiktok", "linkedin", "social", "meta"]):
-                        default_mode = "Social"
-                    elif "email" in src_join or "newsletter" in src_join:
-                        default_mode = "Email"
-                    elif "sms" in src_join or "whatsapp" in src_join:
-                        default_mode = "SMS"
-
-                current_mode_state = st.session_state.get("builder_source_mode")
-                if current_mode_state and current_mode_state not in mode_options:
-                    st.session_state["builder_source_mode"] = default_mode
-
-                source_mode = st.radio(
-                    "Traffic source mode",
-                    mode_options,
-                    horizontal=True,
-                    index=mode_options.index(default_mode) if default_mode in mode_options else len(mode_options)-1,
-                    key="builder_source_mode",
-                    label_visibility="collapsed"
-                )
-                if active_client_config:
-                    st.caption("Priorita valori: naming convention cliente, poi suggerimenti GA4 ordinati per utilizzo.")
-    
                 source_default = ""
                 medium_default = ""
 
-                # Defaults come only from client config — no hardcoded values
+                # Defaults come only from client config or GA4 — no hardcoded values
                 if active_client_config:
                     if client_rule_sources:
                         source_default = normalize_token(client_rule_sources[0])
