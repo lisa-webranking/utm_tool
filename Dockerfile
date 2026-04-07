@@ -2,9 +2,9 @@ FROM python:3.11-slim AS base
 
 WORKDIR /app
 
-# System deps for psycopg2 (PostgreSQL driver)
+# curl for healthcheck
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libpq-dev gcc curl && \
+    apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

@@ -421,191 +421,101 @@ class FileCredentialStore:
 
 
 # ---------------------------------------------------------------------------
-# PostgresStorage implementations
+# FirestoreStorage implementations
 # ---------------------------------------------------------------------------
 
-_pg_pool = None
+_firestore_client = None
 
 
-def _get_pg_connection(dsn: str):
-    """Get a connection from the pool. Caller must call _put_pg_connection() to return it."""
-    global _pg_pool
-    if _pg_pool is None:
-        from psycopg2 import pool as _pool
-        _pg_pool = _pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=dsn)
-        logger.info("PostgreSQL connection pool created (1-10 connections)")
-    return _pg_pool.getconn()
+def _get_firestore():
+    """Lazy-init Firestore client (reused across calls)."""
+    global _firestore_client
+    if _firestore_client is None:
+        from google.cloud import firestore
+        _firestore_client = firestore.Client()
+        logger.info("Firestore client initialized (project: %s)", _firestore_client.project)
+    return _firestore_client
 
 
-def _put_pg_connection(conn) -> None:
-    """Return a connection to the pool instead of closing it."""
-    if _pg_pool is not None:
-        _pg_pool.putconn(conn)
-    else:
-        conn.close()
-
-
-class PostgresUTMHistoryStore:
-    """UTM history backed by PostgreSQL."""
-
-    def __init__(self, dsn: str):
-        self._dsn = dsn
+class FirestoreUTMHistoryStore:
+    """UTM history backed by Firestore collection 'utm_history'."""
 
     def load_all(self) -> list[dict]:
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT user_email, user_email_hash, client_id, property_id, "
-                    "property_name, final_url, utm_source, utm_medium, utm_campaign, "
-                    "campaign_name, live_date, expected_channel, tracking_status, created_at "
-                    "FROM utm_history ORDER BY created_at DESC"
-                )
-                cols = [d[0] for d in cur.description]
-                return [dict(zip(cols, row)) for row in cur.fetchall()]
-        finally:
-            _put_pg_connection(conn)
+        db = _get_firestore()
+        docs = db.collection("utm_history").order_by("created_at", direction="DESCENDING").stream()
+        return [doc.to_dict() for doc in docs]
 
     def load_for_user(self, user_email: str) -> list[dict]:
         eh = _email_hash(user_email)
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT user_email, user_email_hash, client_id, property_id, "
-                    "property_name, final_url, utm_source, utm_medium, utm_campaign, "
-                    "campaign_name, live_date, expected_channel, tracking_status, created_at "
-                    "FROM utm_history WHERE user_email_hash = %s ORDER BY created_at DESC",
-                    (eh,),
-                )
-                cols = [d[0] for d in cur.description]
-                return [dict(zip(cols, row)) for row in cur.fetchall()]
-        finally:
-            _put_pg_connection(conn)
+        db = _get_firestore()
+        docs = (
+            db.collection("utm_history")
+            .where("user_email_hash", "==", eh)
+            .order_by("created_at", direction="DESCENDING")
+            .stream()
+        )
+        return [doc.to_dict() for doc in docs]
 
     def upsert(self, entry: dict) -> None:
         eh = _email_hash(entry.get("user_email", ""))
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO utm_history "
-                    "(user_email_hash, user_email, client_id, property_id, property_name, "
-                    " final_url, utm_source, utm_medium, utm_campaign, campaign_name, "
-                    " live_date, expected_channel, tracking_status, created_at) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
-                    "ON CONFLICT (user_email_hash, property_id, final_url) DO UPDATE SET "
-                    " utm_source=EXCLUDED.utm_source, utm_medium=EXCLUDED.utm_medium, "
-                    " utm_campaign=EXCLUDED.utm_campaign, campaign_name=EXCLUDED.campaign_name, "
-                    " live_date=EXCLUDED.live_date, expected_channel=EXCLUDED.expected_channel, "
-                    " tracking_status=EXCLUDED.tracking_status",
-                    (
-                        eh, entry.get("user_email", ""), entry.get("client_id", ""),
-                        entry.get("property_id", ""), entry.get("property_name", ""),
-                        entry.get("final_url", ""), entry.get("utm_source", ""),
-                        entry.get("utm_medium", ""), entry.get("utm_campaign", ""),
-                        entry.get("campaign_name", ""), entry.get("live_date", ""),
-                        entry.get("expected_channel_group", ""),
-                        entry.get("tracking_status", "pending"),
-                    ),
-                )
-            conn.commit()
-        finally:
-            _put_pg_connection(conn)
+        entry["user_email_hash"] = eh
+        db = _get_firestore()
+        # Composite key: user_email_hash + property_id + final_url
+        doc_id = _email_hash(f"{eh}|{entry.get('property_id', '')}|{entry.get('final_url', '')}")
+        db.collection("utm_history").document(doc_id).set(entry, merge=True)
 
     def write_all(self, items: list[dict]) -> None:
-        """Replace all entries. Used for bulk sync from session cache."""
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM utm_history")
-                for entry in items:
-                    if not isinstance(entry, dict):
-                        continue
-                    eh = _email_hash(entry.get("user_email", ""))
-                    cur.execute(
-                        "INSERT INTO utm_history "
-                        "(user_email_hash, user_email, client_id, property_id, property_name, "
-                        " final_url, utm_source, utm_medium, utm_campaign, campaign_name, "
-                        " live_date, expected_channel, tracking_status, created_at) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())",
-                        (
-                            eh, entry.get("user_email", ""), entry.get("client_id", ""),
-                            entry.get("property_id", ""), entry.get("property_name", ""),
-                            entry.get("final_url", ""), entry.get("utm_source", ""),
-                            entry.get("utm_medium", ""), entry.get("utm_campaign", ""),
-                            entry.get("campaign_name", ""), entry.get("live_date", ""),
-                            entry.get("expected_channel_group", ""),
-                            entry.get("tracking_status", "pending"),
-                        ),
-                    )
-            conn.commit()
-        finally:
-            _put_pg_connection(conn)
+        db = _get_firestore()
+        batch = db.batch()
+        # Delete all existing
+        for doc in db.collection("utm_history").stream():
+            batch.delete(doc.reference)
+        batch.commit()
+        # Write new
+        batch = db.batch()
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            eh = _email_hash(entry.get("user_email", ""))
+            entry["user_email_hash"] = eh
+            doc_id = _email_hash(f"{eh}|{entry.get('property_id', '')}|{entry.get('final_url', '')}")
+            batch.set(db.collection("utm_history").document(doc_id), entry)
+        batch.commit()
 
     def delete_for_user(self, user_email: str, final_url: str) -> None:
         eh = _email_hash(user_email)
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM utm_history WHERE user_email_hash = %s AND final_url = %s",
-                    (eh, final_url),
-                )
-            conn.commit()
-        finally:
-            _put_pg_connection(conn)
+        db = _get_firestore()
+        docs = (
+            db.collection("utm_history")
+            .where("user_email_hash", "==", eh)
+            .where("final_url", "==", final_url)
+            .stream()
+        )
+        for doc in docs:
+            doc.reference.delete()
 
 
-class PostgresClientConfigStore:
-    """Client configs backed by relational PostgreSQL tables (no JSON blobs)."""
-
-    def __init__(self, dsn: str):
-        self._dsn = dsn
+class FirestoreClientConfigStore:
+    """Client configs backed by Firestore collection 'client_configs'."""
 
     def load(self, client_id: str) -> Optional[dict]:
         from utm_normalize import normalize_client_id
         cid = normalize_client_id(client_id)
         if not cid:
             return None
-        conn = _get_pg_connection(self._dsn)
+        db = _get_firestore()
+        doc = db.collection("client_configs").document(cid).get()
+        if not doc.exists:
+            return None
+        data = doc.to_dict()
+        # Validate schema
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT client_id, version, ga4_property_id, ga4_property_name, "
-                    "ga4_client_name, default_country, expected_domain, "
-                    "sources, mediums, campaign_types, campaign_notes, campaign_examples, "
-                    "shared_link, shared_base_url, source_file_name, source_file_sha256, "
-                    "updated_by, created_at, updated_at "
-                    "FROM client_configs WHERE client_id = %s",
-                    (cid,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    return None
-                cols = [d[0] for d in cur.description]
-                data = dict(zip(cols, row))
-                # Convert psycopg2 arrays to Python lists
-                for arr_col in ("sources", "mediums", "campaign_types", "campaign_notes", "campaign_examples"):
-                    data[arr_col] = list(data.get(arr_col) or [])
-                # Convert timestamps to strings
-                for ts_col in ("created_at", "updated_at"):
-                    if data.get(ts_col):
-                        data[ts_col] = str(data[ts_col])
-
-                # Load medium→source mapping from separate table
-                cur.execute(
-                    "SELECT medium, source FROM client_medium_source_map WHERE client_id = %s",
-                    (cid,),
-                )
-                msm: dict[str, list[str]] = {}
-                for m, s in cur.fetchall():
-                    msm.setdefault(m, []).append(s)
-                data["medium_source_map"] = msm
-
-                return data
-        finally:
-            _put_pg_connection(conn)
+            _cfg, warnings = validate_client_config(data)
+            for w in warnings:
+                logger.warning("Client config '%s': %s", cid, w)
+        except ClientConfigError as e:
+            logger.error("Client config '%s' validation failed: %s", cid, e)
+        return data
 
     def save(self, client_id: str, payload: dict) -> None:
         from utm_normalize import normalize_client_id
@@ -614,166 +524,70 @@ class PostgresClientConfigStore:
             raise ValueError("client_id non valido")
         body = dict(payload or {})
         body["client_id"] = cid
-        cfg, _ = validate_client_config(body)
-
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO client_configs "
-                    "(client_id, version, ga4_property_id, ga4_property_name, ga4_client_name, "
-                    " default_country, expected_domain, sources, mediums, campaign_types, "
-                    " campaign_notes, campaign_examples, shared_link, shared_base_url, "
-                    " source_file_name, source_file_sha256, updated_by, updated_at) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
-                    "ON CONFLICT (client_id) DO UPDATE SET "
-                    " version=EXCLUDED.version, ga4_property_id=EXCLUDED.ga4_property_id, "
-                    " ga4_property_name=EXCLUDED.ga4_property_name, ga4_client_name=EXCLUDED.ga4_client_name, "
-                    " default_country=EXCLUDED.default_country, expected_domain=EXCLUDED.expected_domain, "
-                    " sources=EXCLUDED.sources, mediums=EXCLUDED.mediums, campaign_types=EXCLUDED.campaign_types, "
-                    " campaign_notes=EXCLUDED.campaign_notes, campaign_examples=EXCLUDED.campaign_examples, "
-                    " shared_link=EXCLUDED.shared_link, shared_base_url=EXCLUDED.shared_base_url, "
-                    " source_file_name=EXCLUDED.source_file_name, source_file_sha256=EXCLUDED.source_file_sha256, "
-                    " updated_by=EXCLUDED.updated_by, updated_at=NOW()",
-                    (
-                        cid, cfg.version, cfg.ga4_property_id, cfg.ga4_property_name,
-                        cfg.ga4_client_name, cfg.default_country, cfg.expected_domain,
-                        cfg.sources, cfg.mediums, cfg.campaign_types,
-                        cfg.campaign_notes, cfg.campaign_examples,
-                        cfg.shared_link, cfg.shared_base_url,
-                        cfg.source_file_name, cfg.source_file_sha256, cfg.updated_by,
-                    ),
-                )
-                # Replace medium→source mapping
-                cur.execute("DELETE FROM client_medium_source_map WHERE client_id = %s", (cid,))
-                for medium, sources_list in cfg.medium_source_map.items():
-                    for source in sources_list:
-                        cur.execute(
-                            "INSERT INTO client_medium_source_map (client_id, medium, source) "
-                            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                            (cid, medium, source),
-                        )
-            conn.commit()
-        finally:
-            _put_pg_connection(conn)
+        validate_client_config(body)
+        db = _get_firestore()
+        db.collection("client_configs").document(cid).set(body)
 
     def list_ids(self) -> list[str]:
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT client_id FROM client_configs ORDER BY client_id")
-                return [row[0] for row in cur.fetchall()]
-        finally:
-            _put_pg_connection(conn)
+        db = _get_firestore()
+        docs = db.collection("client_configs").stream()
+        return sorted([doc.id for doc in docs])
 
     def delete(self, client_id: str) -> None:
         from utm_normalize import normalize_client_id
         cid = normalize_client_id(client_id)
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                # CASCADE deletes medium_source_map rows
-                cur.execute("DELETE FROM client_configs WHERE client_id = %s", (cid,))
-            conn.commit()
-        finally:
-            _put_pg_connection(conn)
+        if not cid:
+            return
+        db = _get_firestore()
+        db.collection("client_configs").document(cid).delete()
 
 
-class PostgresCredentialStore:
-    """OAuth tokens and API keys backed by PostgreSQL."""
-
-    def __init__(self, dsn: str):
-        self._dsn = dsn
-
-    def _ensure_user(self, cur, user_email: str) -> int:
-        """Get or create user row, return user_id."""
-        eh = _email_hash(user_email)
-        cur.execute("SELECT id FROM users WHERE email_hash = %s", (eh,))
-        row = cur.fetchone()
-        if row:
-            return row[0]
-        cur.execute(
-            "INSERT INTO users (email_hash) VALUES (%s) RETURNING id", (eh,)
-        )
-        return cur.fetchone()[0]
+class FirestoreCredentialStore:
+    """OAuth tokens and API keys backed by Firestore collection 'users'."""
 
     def save_token(self, user_email: str, creds_json: str) -> None:
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                uid = self._ensure_user(cur, user_email)
-                cur.execute(
-                    "INSERT INTO credentials (user_id, provider, token_json, updated_at) "
-                    "VALUES (%s, 'google', %s, NOW()) "
-                    "ON CONFLICT (user_id, provider) DO UPDATE SET "
-                    " token_json = EXCLUDED.token_json, updated_at = NOW()",
-                    (uid, creds_json),
-                )
-            conn.commit()
-        finally:
-            _put_pg_connection(conn)
+        eh = _email_hash(user_email)
+        db = _get_firestore()
+        db.collection("users").document(eh).set(
+            {"token_json": creds_json}, merge=True
+        )
 
     def load_token(self, user_email: str) -> Optional[str]:
         eh = _email_hash(user_email)
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT c.token_json FROM credentials c "
-                    "JOIN users u ON c.user_id = u.id "
-                    "WHERE u.email_hash = %s AND c.provider = 'google'",
-                    (eh,),
-                )
-                row = cur.fetchone()
-                return row[0] if row else None
-        finally:
-            _put_pg_connection(conn)
+        db = _get_firestore()
+        doc = db.collection("users").document(eh).get()
+        if not doc.exists:
+            return None
+        return doc.to_dict().get("token_json")
 
     def delete_token(self, user_email: str) -> None:
         eh = _email_hash(user_email)
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM credentials WHERE user_id IN "
-                    "(SELECT id FROM users WHERE email_hash = %s) AND provider = 'google'",
-                    (eh,),
-                )
-            conn.commit()
-        finally:
-            _put_pg_connection(conn)
+        db = _get_firestore()
+        doc_ref = db.collection("users").document(eh)
+        doc = doc_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+            data.pop("token_json", None)
+            if data:
+                doc_ref.set(data)
+            else:
+                doc_ref.delete()
 
     def save_api_key(self, user_email: str, service: str, key: str) -> None:
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                uid = self._ensure_user(cur, user_email)
-                cur.execute(
-                    "INSERT INTO api_keys (user_id, service, encrypted_key, updated_at) "
-                    "VALUES (%s, %s, %s, NOW()) "
-                    "ON CONFLICT (user_id, service) DO UPDATE SET "
-                    " encrypted_key = EXCLUDED.encrypted_key, updated_at = NOW()",
-                    (uid, service, key),
-                )
-            conn.commit()
-        finally:
-            _put_pg_connection(conn)
+        eh = _email_hash(user_email)
+        db = _get_firestore()
+        db.collection("users").document(eh).set(
+            {f"api_key_{service}": key}, merge=True
+        )
 
     def load_api_key(self, user_email: str, service: str) -> Optional[str]:
         eh = _email_hash(user_email)
-        conn = _get_pg_connection(self._dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT a.encrypted_key FROM api_keys a "
-                    "JOIN users u ON a.user_id = u.id "
-                    "WHERE u.email_hash = %s AND a.service = %s",
-                    (eh, service),
-                )
-                row = cur.fetchone()
-                return row[0] if row else None
-        finally:
-            _put_pg_connection(conn)
+        db = _get_firestore()
+        doc = db.collection("users").document(eh).get()
+        if not doc.exists:
+            return None
+        return doc.to_dict().get(f"api_key_{service}")
+
 
 
 # ---------------------------------------------------------------------------
@@ -794,26 +608,25 @@ def create_file_stores(base_dir: Path) -> tuple[
     )
 
 
-def create_postgres_stores(dsn: str) -> tuple[
-    PostgresUTMHistoryStore, PostgresClientConfigStore, PostgresCredentialStore
+def create_firestore_stores() -> tuple[
+    FirestoreUTMHistoryStore, FirestoreClientConfigStore, FirestoreCredentialStore
 ]:
-    """Create all PostgreSQL-backed stores."""
+    """Create all Firestore-backed stores."""
     return (
-        PostgresUTMHistoryStore(dsn),
-        PostgresClientConfigStore(dsn),
-        PostgresCredentialStore(dsn),
+        FirestoreUTMHistoryStore(),
+        FirestoreClientConfigStore(),
+        FirestoreCredentialStore(),
     )
 
 
 def create_stores(base_dir: Path):
-    """Auto-select storage backend based on DATABASE_URL env var.
+    """Auto-select storage backend based on USE_FIRESTORE env var.
 
-    If DATABASE_URL is set, uses PostgreSQL. Otherwise, uses local JSON files.
+    If USE_FIRESTORE=1, uses Firestore. Otherwise, uses local JSON files.
     """
     import os
-    dsn = os.environ.get("DATABASE_URL", "").strip()
-    if dsn:
-        logger.info("Using PostgreSQL storage backend")
-        return create_postgres_stores(dsn)
+    if os.environ.get("USE_FIRESTORE", "").strip() in ("1", "true", "yes"):
+        logger.info("Using Firestore storage backend")
+        return create_firestore_stores()
     logger.info("Using file-based storage backend")
     return create_file_stores(base_dir)
