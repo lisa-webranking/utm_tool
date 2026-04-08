@@ -76,28 +76,28 @@ def build_oauth_flow(
 
 
 def save_credentials(creds: Credentials, cred_store, legacy_path: Path) -> None:
-    """Persist OAuth credentials. Uses per-user store if email known, else legacy file."""
-    email = st.session_state.get("user_email", "")
-    if email:
+    """Persist OAuth credentials only for a known user-bound session.
+
+    legacy_path is kept only for cleanup compatibility. New logins must never
+    fall back to a global token file shared across anonymous sessions.
+    """
+    email = str(st.session_state.get("user_email", "") or "").strip().lower()
+    if not email:
+        logger.info("Skipping credential persistence because user_email is not resolved yet")
+        return
+    try:
         cred_store.save_token(email, creds.to_json())
-    else:
-        try:
-            legacy_path.write_text(creds.to_json(), encoding="utf-8")
-        except Exception:
-            logger.debug("Failed to save credentials to legacy path")
+    except Exception:
+        logger.debug("Failed to save credentials to per-user store", exc_info=True)
 
 
 def load_credentials(cred_store, legacy_path: Path) -> Optional[Credentials]:
-    """Load and auto-refresh persisted OAuth credentials."""
-    email = st.session_state.get("user_email", "")
+    """Load and auto-refresh persisted OAuth credentials for a known user only."""
+    email = str(st.session_state.get("user_email", "") or "").strip().lower()
+    if not email:
+        return None
 
-    token_json = cred_store.load_token(email) if email else None
-    if not token_json and legacy_path.exists():
-        try:
-            token_json = legacy_path.read_text(encoding="utf-8")
-        except Exception:
-            token_json = None
-
+    token_json = cred_store.load_token(email)
     if not token_json:
         return None
     try:
@@ -106,7 +106,7 @@ def load_credentials(cred_store, legacy_path: Path) -> Optional[Credentials]:
             return creds
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            save_credentials(creds, cred_store, legacy_path)
+            cred_store.save_token(email, creds.to_json())
             return creds
     except Exception:
         logger.debug("Failed to load/refresh credentials", exc_info=True)

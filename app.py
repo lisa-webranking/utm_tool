@@ -1,4 +1,4 @@
-# -*- coding: latin-1 -*-
+# -*- coding: utf-8 -*-
 from log_config import setup_logging
 setup_logging()
 
@@ -452,7 +452,7 @@ def check_tracking_status_for_entry(entry: dict, creds, grace_days: int = 2):
         if total_sessions > 0 and observed_channel != expected:
             return {
                 "status": "WARNING",
-                "message": f"Il traffico Ã¨ finito in {observed_channel} invece di {expected}",
+                "message": f"Il traffico è finito in {observed_channel} invece di {expected}",
                 "sessions": total_sessions,
                 "observed": observed_channel,
             }
@@ -537,11 +537,83 @@ def fetch_ga4_weekly_campaign_audit(property_id: str, creds, client_config: dict
 
 
 # --- SERVER-SIDE OAUTH CACHE ---
-# Necessario perchÃ© Streamlit distrugge st.session_state quando l'utente cambia tab o naviga via,
+# Necessario perché Streamlit distrugge st.session_state quando l'utente cambia tab o naviga via,
 # perdendo il PKCE code_verifier autogenerato da google-auth.
 @st.cache_resource
 def get_oauth_cache():
     return {}
+
+
+def _get_safe_oauth_context_payload(flow) -> dict:
+    """Capture only safe UI context that must survive the OAuth redirect."""
+    raw_client_id = normalize_client_id(st.query_params.get("client_id", ""))
+    raw_sig = str(st.query_params.get("sig", "") or "").strip()
+    raw_open_chat = str(st.query_params.get("open_chat", "") or "").strip().lower()
+    locked_client_id = normalize_client_id(st.session_state.get("client_id_lock", ""))
+
+    payload = {
+        "code_verifier": getattr(flow, "code_verifier", ""),
+        "client_id_lock": locked_client_id,
+        "open_chat": raw_open_chat in {"1", "true", "yes"},
+    }
+
+    # Only restore signed link params if they already matched a validated lock.
+    if raw_client_id and raw_sig and locked_client_id and raw_client_id == locked_client_id:
+        payload["client_id"] = raw_client_id
+        payload["sig"] = raw_sig
+
+    return payload
+
+
+def _consume_oauth_context_payload(state_token: str) -> dict:
+    """Read and remove the cached payload associated with an OAuth state token."""
+    if not state_token:
+        return {}
+    cache = get_oauth_cache()
+    payload = cache.pop(state_token, None)
+    if isinstance(payload, str):
+        return {"code_verifier": payload}
+    if isinstance(payload, dict):
+        return dict(payload)
+    return {}
+
+
+def _restore_safe_post_auth_context(payload: dict) -> None:
+    """Restore only non-sensitive context after the OAuth callback."""
+    restored_client_lock = normalize_client_id(payload.get("client_id_lock", ""))
+    if restored_client_lock:
+        st.session_state.client_id_lock = restored_client_lock
+        st.session_state.client_lock_error = ""
+
+    if payload.get("open_chat"):
+        st.session_state.chat_visible = True
+
+    st.query_params.clear()
+
+    restored_client_id = normalize_client_id(payload.get("client_id", ""))
+    restored_sig = str(payload.get("sig", "") or "").strip()
+    if restored_client_id and restored_sig:
+        st.query_params["client_id"] = restored_client_id
+        st.query_params["sig"] = restored_sig
+
+    if payload.get("open_chat"):
+        st.query_params["open_chat"] = "1"
+
+
+def _ensure_session_user_email(creds: Optional[Credentials] = None) -> str:
+    """Resolve and cache the authenticated user's email inside the current session."""
+    current_email = str(st.session_state.get("user_email", "") or "").strip().lower()
+    if current_email:
+        return current_email
+
+    active_creds = creds or st.session_state.get("credentials")
+    if not active_creds:
+        return ""
+
+    resolved_email = str(get_user_email(active_creds) or "").strip().lower()
+    if resolved_email:
+        st.session_state.user_email = resolved_email
+    return resolved_email
 
 
 def _save_persistent_credentials(creds: Credentials) -> None:
@@ -561,7 +633,7 @@ def show_login_page():
                 <div class='login-eyebrow'>Webranking Toolkit</div>
                 <h1 class='login-title'>Universal UTM Governance</h1>
                 <p class='login-subtitle'>
-                    Accedi con Google Analytics per creare, verificare e governare i link UTM in un unico workspace.
+                    Accedi con il tuo account Google Analytics per creare, verificare e governare i link UTM in un unico workspace.
                 </p>
             </div>
             """,
@@ -579,12 +651,11 @@ def show_login_page():
             # Salviamo il code_verifier nella cache persistente del server, non nella sessione del browser,
             # agganciandolo all'ID univoco 'state' per recuperarlo quando l'utente torna (anche in un nuovo tab)
             cache = get_oauth_cache()
-            if hasattr(flow, 'code_verifier'):
-                cache[state_token] = flow.code_verifier
+            cache[state_token] = _get_safe_oauth_context_payload(flow)
 
             st.link_button("Login con Google Analytics", auth_url, type="primary", use_container_width=True)
             st.markdown(
-                "<p class='login-note'>La sessione usa OAuth ufficiale Google con autorizzazioni GA4 in sola lettura e gestione.</p>",
+                "<p class='login-note'>Ogni persona accede con il proprio Google. Il link condiviso mantiene solo il contesto cliente, non la sessione di chi lo ha generato.</p>",
                 unsafe_allow_html=True,
             )
         else:
@@ -614,21 +685,25 @@ def show_dashboard():
     if "show_user_menu" not in st.session_state:
         st.session_state.show_user_menu = False
 
-    header_left, header_docs, header_account = st.columns([0.74, 0.12, 0.14], gap="small")
+    header_left, header_docs, header_account = st.columns([0.72, 0.12, 0.16], gap="small")
     with header_left:
         st.markdown(
             """
             <div class="lovable-topbar">
                 <div class="lovable-brand">
                     <span class="lovable-badge-w">W</span>
-                    <div class="lovable-title">SMART UTM <span class="lovable-beta">BETA</span></div>
+                    <div class="lovable-brand-copy">
+                        <div class="lovable-title">Smart UTM</div>
+                        <div class="lovable-subtitle">Universal UTM Governance</div>
+                    </div>
+                    <span class="lovable-beta">Beta</span>
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
     with header_docs:
-        st.markdown('<div class="lovable-docs-link">Docs</div>', unsafe_allow_html=True)
+        st.markdown('<div class="lovable-docs-link">Workspace</div>', unsafe_allow_html=True)
     with header_account:
         if hasattr(st, "popover"):
             with st.popover("Account", use_container_width=True):
@@ -654,9 +729,9 @@ def show_dashboard():
         st.markdown('<div class="form-card">', unsafe_allow_html=True)
         s_col1, s_col2 = st.columns([0.92, 0.08])
         with s_col1:
-            st.markdown("### âš™ï¸ Impostazioni")
+            st.markdown("### ⚙️ Impostazioni")
         with s_col2:
-            if st.button("âœ•", key="close_settings_top", help="Chiudi impostazioni", use_container_width=True):
+            if st.button("✕", key="close_settings_top", help="Chiudi impostazioni", use_container_width=True):
                 st.session_state.show_settings = False
                 st.rerun()
         with st.container():
@@ -664,7 +739,7 @@ def show_dashboard():
             st.markdown(f"**Account:** {st.session_state.user_email}")
             
             current_key = st.session_state.get("gemini_api_key", "")
-            key_status = "âœ… Configurata" if current_key else "âŒ Non configurata"
+            key_status = "✅ Configurata" if current_key else "❌ Non configurata"
             st.markdown(f"**Stato API Key:** {key_status}")
             
             with st.form("api_key_form"):
@@ -676,14 +751,14 @@ def show_dashboard():
                 )
                 col1, col2 = st.columns([1, 1])
                 with col1:
-                    save_btn = st.form_submit_button("ðŸ’¾ Salva", use_container_width=True)
+                    save_btn = st.form_submit_button("💾 Salva", use_container_width=True)
                 with col2:
                     close_btn = st.form_submit_button("Chiudi", use_container_width=True)
                 
                 if save_btn and new_api_key:
                     st.session_state.gemini_api_key = new_api_key
                     save_persistent_api_key(st.session_state.user_email, new_api_key)
-                    st.success("âœ… API Key salvata con successo!")
+                    st.success("✅ API Key salvata con successo!")
                     st.session_state.show_settings = False
                     st.rerun()
                 
@@ -693,93 +768,65 @@ def show_dashboard():
             
             # --- GA4 Diagnostics ---
             st.markdown("---")
-            st.markdown("### ðŸ”Œ Connessione GA4")
-            if st.button("ðŸ” Test connessione GA4", key="test_ga4_btn"):
+            st.markdown("### 🔌 Connessione GA4")
+            if st.button("🔁 Test connessione GA4", key="test_ga4_btn"):
                 with st.spinner("Verifica connessione GA4..."):
                     result = ga4_mcp_tools.get_account_summaries(st.session_state.credentials)
                 if isinstance(result, list) and len(result) > 0:
-                    st.success(f"âœ… Connessione GA4 OK! Trovati {len(result)} account.")
+                    st.success(f"✅ Connessione GA4 OK! Trovati {len(result)} account.")
                 elif isinstance(result, list) and len(result) == 0:
-                    st.warning("âš ï¸ Connessione OK ma nessun account GA4 trovato per questo utente.")
+                    st.warning("⚠️ Connessione OK ma nessun account GA4 trovato per questo utente.")
                 elif isinstance(result, dict) and "error" in result:
                     error_type = result.get("error_type", "Sconosciuto")
                     error_msg = result.get("error", "")
-                    st.error(f"â�Errore GA4\n\n**Tipo:** {error_type}\n\n**Dettaglio:** {error_msg}")
+                    st.error(f"�Errore GA4\n\n**Tipo:** {error_type}\n\n**Dettaglio:** {error_msg}")
                     if any(kw in error_msg.lower() for kw in ["credentials", "scope", "permission", "unauthenticated", "unauthorized", "403", "401"]):
-                        st.warning("ðŸ’¡ Il token OAuth potrebbe avere scope insufficienti. Prova a fare **Logout** e ri-accedere con Google.")
+                        st.warning("💡 Il token OAuth potrebbe avere scope insufficienti. Prova a fare **Logout** e ri-accedere con Google.")
                 else:
                     st.info(f"Risposta inattesa: {result}")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="hero">
-        <div class="hero-status">&#9679; Connesso a GA4 in tempo reale</div>
-        <div class="hero-title">Smart UTM <span class="hero-title-accent">Assistant</span></div>
-        <div class="hero-desc">Crea e valida link UTM con guida passo-passo, leggendo in tempo reale source e medium dalla tua property GA4.</div>
-        <div id="hero-open-chat-cta" class="assistant-cta-link" role="button" tabindex="0" aria-label="Apri chatbot WR Assistant">
-            <div class="assistant-cta">
-                <div class="assistant-cta-inner">
-                    <div class="assistant-cta-icon">&#128172;<span class="assistant-cta-sparkle">&#10022;</span></div>
-                    <div class="assistant-cta-body">
-                        <div class="assistant-cta-title">Crea UTM con l'Assistente AI</div>
-                        <div class="assistant-cta-copy">Apri il chatbot e lasciati guidare passo dopo passo</div>
+    st.markdown(
+        """
+        <div class="intro-shell">
+            <div class="intro-grid">
+                <div class="intro-copy">
+                    <div class="intro-kicker">Workspace UTM</div>
+                    <div class="intro-status">&#9679; Sincronizzato con GA4 in tempo reale</div>
+                    <div class="intro-title">Builder <span class="intro-title-accent">manuale</span> in primo piano, assistente <span class="intro-title-mark">AI</span> solo quando serve.</div>
+                    <div class="intro-desc">
+                        Crea, valida e governa link UTM con source e medium reali, naming coerente e un flusso piu leggibile per il team.
                     </div>
-                    <div class="assistant-cta-arrow">&#8594;</div>
+                    <div class="intro-points">
+                        <div class="intro-point">
+                            <div class="intro-point-title">Dati reali</div>
+                            <div class="intro-point-copy">Source e medium letti dalla property attiva.</div>
+                        </div>
+                        <div class="intro-point">
+                            <div class="intro-point-title">Builder first</div>
+                            <div class="intro-point-copy">I campi manuali restano il canvas principale di lavoro.</div>
+                        </div>
+                        <div class="intro-point">
+                            <div class="intro-point-title">Controlli rapidi</div>
+                            <div class="intro-point-copy">Validazione, storico e audit restano nello stesso workspace.</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="assistant-context-card">
+                    <div class="assistant-context-label">Assistente AI</div>
+                    <div class="assistant-context-title">Supporto <span class="assistant-context-mark">guidato</span>, non distrazione.</div>
+                    <div class="assistant-context-copy">
+                        Quando ti serve un percorso guidato o un doppio controllo, apri il pulsante WR in basso a destra.
+                    </div>
+                    <div class="assistant-context-foot">
+                        Utile per naming, suggerimenti veloci e pulizia dei parametri prima della consegna.
+                    </div>
                 </div>
             </div>
         </div>
-        <div class="hero-sub">Oppure compila manualmente i campi qui sotto &#8595;</div>
-        <div class="feature-grid">
-            <div class="feature-card">
-                <div class="feature-icon">
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <ellipse cx="12" cy="5" rx="7" ry="3"></ellipse>
-                        <path d="M5 5v14c0 1.7 3.1 3 7 3s7-1.3 7-3V5"></path>
-                        <path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"></path>
-                    </svg>
-                </div>
-                <div class="feature-title">Dati reali da GA4</div>
-                <div class="feature-copy">Source e medium precaricati dalla tua property: niente piu errori di digitazione.</div>
-            </div>
-            <div class="feature-card">
-                <div class="feature-icon">
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <rect x="4" y="8" width="16" height="11" rx="2"></rect>
-                        <path d="M9 4h6"></path>
-                        <path d="M12 4v4"></path>
-                        <circle cx="9" cy="13" r="1"></circle>
-                        <circle cx="15" cy="13" r="1"></circle>
-                    </svg>
-                </div>
-                <div class="feature-title">Assistente AI dedicato</div>
-                <div class="feature-copy">Un chatbot che ti guida nella scelta dei parametri, suggerendo best practice.</div>
-            </div>
-            <div class="feature-card">
-                <div class="feature-icon">
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M16 3h5v5"></path>
-                        <path d="M4 20l8-8"></path>
-                        <path d="M21 3l-9 9"></path>
-                        <path d="M4 4h5v5"></path>
-                        <path d="M16 16l5 5"></path>
-                    </svg>
-                </div>
-                <div class="feature-title">Naming convention unificata</div>
-                <div class="feature-copy">Parametri coerenti tra team e campagne, addio a UTM duplicati o incoerenti.</div>
-            </div>
-            <div class="feature-card">
-                <div class="feature-icon">
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M12 3l7 3v6c0 5-3.5 8.8-7 10-3.5-1.2-7-5-7-10V6l7-3z"></path>
-                        <path d="M9 12l2 2 4-4"></path>
-                    </svg>
-                </div>
-                <div class="feature-title">Validazione automatica</div>
-                <div class="feature-copy">Controllo in tempo reale di errori, duplicati e formattazione prima di generare l'URL.</div>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
     # --- CONTESTO CLIENTE ATTIVO (LINK FIRMATO O SCELTA INTERNA WR) ---
     locked_client_id = st.session_state.get("client_id_lock", "")
@@ -797,20 +844,58 @@ def show_dashboard():
 
     if active_client_id:
         if active_client_config:
-            st.info(f"Tool configurato sul cliente: {active_client_id}")
-            if lock_resolution_note:
-                st.caption(lock_resolution_note)
-            st.caption("Apri il chatbot con il pulsante WR in basso a destra.")
+            note_html = (
+                f'<div class="client-status-note">{html_lib.escape(lock_resolution_note)}</div>'
+                if lock_resolution_note else
+                '<div class="client-status-note">Il contesto cliente aggiorna builder, verifiche, audit e assistant.</div>'
+            )
+            st.markdown(
+                f"""
+                <div class="client-status-strip is-active">
+                    <div class="client-status-label">Cliente attivo</div>
+                    <div class="client-status-value">{html_lib.escape(active_client_id)}</div>
+                    {note_html}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         else:
-            st.warning(f"Nessuna configurazione trovata per il cliente bloccato: {active_client_id}")
+            st.markdown(
+                f"""
+                <div class="client-status-strip is-warning">
+                    <div class="client-status-label">Contesto cliente</div>
+                    <div class="client-status-value">Configurazione non trovata per {html_lib.escape(active_client_id)}</div>
+                    <div class="client-status-note">Verifica il link firmato o seleziona una configurazione valida.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
     if st.session_state.get("client_lock_error"):
-        st.warning(st.session_state.get("client_lock_error"))
+        st.markdown(
+            f"""
+            <div class="client-status-strip is-warning">
+                <div class="client-status-label">Errore contesto cliente</div>
+                <div class="client-status-note">{html_lib.escape(st.session_state.get("client_lock_error"))}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     if is_webranking_user:
         cfg_scope_help = "Questa selezione vale per tutte le tab del tool e per il chatbot."
         with st.container(border=True):
-            st.markdown("#### Configurazione cliente")
+            st.markdown('<div class="client-context-marker"></div>', unsafe_allow_html=True)
+            st.markdown(
+                """
+                <div class="client-context-header">
+                    <div class="client-context-kicker">Contesto condiviso</div>
+                    <div class="client-context-title">Configurazione cliente</div>
+                    <div class="client-context-copy">La selezione qui sotto allinea builder, check, storico, audit e assistant.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
             if st.session_state.get("client_id_lock"):
                 st.text_input(
                     "Configurazione cliente (solo interno WR)",
@@ -835,7 +920,7 @@ def show_dashboard():
                 if picked_norm != current_builder_cfg:
                     st.session_state["builder_selected_client_id"] = picked_norm
                     st.rerun()
-            st.caption("Questa configurazione e' trasversale: aggiorna Build URL, Check URL, UTM History & Tracking, Weekly UTM Audit e chatbot.")
+            st.caption("Questa configurazione aggiorna tutto il workspace in una sola volta.")
 
     # --- TABS DI NAVIGAZIONE ---
     tab_builder, tab_checker, tab_client_config, tab_history, tab_weekly_audit = st.tabs(
@@ -851,14 +936,14 @@ def show_dashboard():
     # ==============================================================================
     with tab_builder:
         if "manual_fields_open" not in st.session_state:
-            st.session_state["manual_fields_open"] = False
+            st.session_state["manual_fields_open"] = True
 
         st.markdown(
             """
             <div class="manual-entry-gate">
-                <div class="manual-entry-gate-badge">Modalita esperto</div>
-                <div class="manual-entry-gate-title">Compilazione manuale avanzata</div>
-                <div class="manual-entry-gate-copy">Per guidare anche i meno esperti, il percorso consigliato resta il chatbot. Se preferisci controllo completo, puoi aprire il builder avanzato.</div>
+                <div class="manual-entry-gate-badge">Workspace principale</div>
+                <div class="manual-entry-gate-title">Builder UTM manuale</div>
+                <div class="manual-entry-gate-copy">Compila direttamente i campi chiave. Usa l&apos;assistant AI solo quando vuoi supporto guidato o un controllo finale.</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -868,7 +953,7 @@ def show_dashboard():
         with gate_col1:
             if not st.session_state.get("manual_fields_open", False):
                 if st.button(
-                    "Apri builder avanzato (modalita esperto)",
+                    "Mostra builder manuale",
                     key="open_manual_fields_btn",
                     use_container_width=True,
                 ):
@@ -876,7 +961,7 @@ def show_dashboard():
                     st.rerun()
             else:
                 if st.button(
-                    "Chiudi modalita esperto",
+                    "Riduci builder manuale",
                     key="close_manual_fields_btn",
                     use_container_width=True,
                 ):
@@ -885,18 +970,18 @@ def show_dashboard():
         with gate_col2:
             if st.session_state.get("manual_fields_open", False):
                 st.markdown(
-                    '<div class="manual-entry-aside">Builder avanzato aperto: ora puoi compilare ogni campo manualmente.</div>',
+                    '<div class="manual-entry-aside">Builder attivo: compila i campi essenziali, genera l&apos;URL e salva nello storico quando tutto e coerente.</div>',
                     unsafe_allow_html=True,
                 )
             else:
                 st.markdown(
-                    '<div class="manual-entry-aside">Consigliato: parti dal chatbot e usa il builder manuale solo quando serve controllo totale.</div>',
+                    '<div class="manual-entry-aside">Builder nascosto: puoi riaprirlo in qualsiasi momento e continuare a usare l&apos;assistant dal pulsante WR.</div>',
                     unsafe_allow_html=True,
                 )
 
         if not st.session_state.get("manual_fields_open", False):
             st.markdown(
-                '<div class="manual-entry-hint">Builder avanzato chiuso. Per la maggior parte dei casi e consigliato usare prima il chatbot.</div>',
+                '<div class="manual-entry-hint">Il builder manuale e nascosto. Riportalo in vista per compilare i parametri e generare il link.</div>',
                 unsafe_allow_html=True,
             )
         if st.session_state.get("manual_fields_open", False):
@@ -925,8 +1010,9 @@ def show_dashboard():
                 f"""
                 <div class="builder-head">
                     <div>
-                        <div class="builder-head-title">Campaign URL Builder</div>
-                        <div class="builder-head-sub">Seleziona la property GA4 per caricare source e medium reali.</div>
+                        <div class="builder-head-kicker">Build URL</div>
+                        <div class="builder-head-title">Componi il link in modo <span class="builder-head-highlight">pulito</span>.</div>
+                        <div class="builder-head-sub">Parti dalla property GA4 attiva, completa i campi essenziali e valida il risultato nello stesso flusso.</div>
                     </div>
                     <div class="builder-head-right">
                         <span class="builder-required-pill {required_class}">{required_count}/3 required</span>
@@ -1505,21 +1591,21 @@ def show_dashboard():
                             #copy-utm-btn {{
                                 width: 100%;
                                 height: 44px;
-                                border-radius: 12px;
-                                font-size: 18px;
+                                border-radius: 999px;
+                                font-size: 15px;
                                 font-weight: 700;
                                 cursor: pointer;
                                 transition: all .18s ease;
                             }}
                             #copy-btn {{
-                                border: 1px solid #162130;
-                                background: #162130;
-                                color: #f5f8fc;
-                                box-shadow: 0 3px 9px rgba(22, 33, 48, 0.22);
+                                border: 1px solid #20251f;
+                                background: linear-gradient(135deg, #8be7a5, #71d995);
+                                color: #152019;
+                                box-shadow: 0 8px 16px rgba(111, 209, 149, 0.28);
                             }}
                             #copy-btn:hover:enabled {{
                                 transform: translateY(-1px);
-                                box-shadow: 0 6px 12px rgba(22, 33, 48, 0.28);
+                                box-shadow: 0 10px 20px rgba(111, 209, 149, 0.34);
                             }}
                             #copy-btn:disabled,
                             #copy-utm-btn:disabled {{
@@ -1528,23 +1614,23 @@ def show_dashboard():
                                 box-shadow: none;
                             }}
                             #copy-btn:disabled {{
-                                background: #7b8694;
-                                border-color: #7b8694;
-                                color: #eef2f6;
+                                background: #b7c0b9;
+                                border-color: #b7c0b9;
+                                color: #edf2ee;
                             }}
                             #copy-utm-btn:disabled {{
-                                background: #eef3f8;
-                                border-color: #d5e0eb;
-                                color: #7e8ea2;
+                                background: #eef4ee;
+                                border-color: #d3ddd3;
+                                color: #849083;
                             }}
                             #copy-utm-btn {{
-                                border: 1px solid #c8d8e8;
-                                background: #f7f9fc;
-                                color: #1f2f3f;
+                                border: 1px solid #b8e8c6;
+                                background: #eef8f0;
+                                color: #1d3425;
                             }}
                             #copy-utm-btn:hover:enabled {{
-                                background: #eef4fa;
-                                border-color: #b8ccde;
+                                background: #e6f6ea;
+                                border-color: #8edaa6;
                             }}
                         </style>
                         <div class="copy-stack">
@@ -1725,7 +1811,7 @@ def show_dashboard():
             )
         if st.session_state.get("client_id_lock"):
             st.warning("Modalita�  cliente bloccata attiva in questa sessione.")
-            if st.button("Sblocca modalitÃ  cliente", key="unlock_client_mode_btn"):
+            if st.button("Sblocca modalità cliente", key="unlock_client_mode_btn"):
                 st.session_state.client_id_lock = ""
                 st.session_state.client_lock_error = ""
                 try:
@@ -2005,7 +2091,7 @@ def show_dashboard():
             if not cid:
                 st.error("Inserisci un Client ID valido.")
             elif st.session_state.get("cfg_manage_mode") == "Nuova configurazione aggiuntiva" and cid in existing_client_ids:
-                st.error("Questo Client ID esiste giÃ . Per aggiornare usa 'Modifica configurazione' oppure inserisci un nuovo Client ID.")
+                st.error("Questo Client ID esiste già. Per aggiornare usa 'Modifica configurazione' oppure inserisci un nuovo Client ID.")
             else:
                 existing_cfg = load_client_config(cid) or {}
                 base_url = str(st.session_state.get("cfg_base_url", "")).strip() or "https://utm-builder.streamlit.app/"
@@ -2300,13 +2386,13 @@ if __name__ == "__main__":
             st.session_state.client_lock_error = lock_error
             st.session_state.client_id_lock = ""
 
-    # Auto-login persistente: resta attivo fino a logout esplicito.
-    if st.session_state.credentials is None:
+    # Restore persisted credentials only for a user already bound to this session.
+    if st.session_state.credentials is None and st.session_state.get("user_email"):
         persisted_creds = _load_persistent_credentials()
         if persisted_creds:
             st.session_state.credentials = persisted_creds
 
-    # Fallback to web auth if token.json is not present (or we are in Cloud)
+    # OAuth callback for unauthenticated sessions.
     if not st.session_state.credentials:
         query_params = st.query_params
         if "code" in query_params:
@@ -2316,15 +2402,15 @@ if __name__ == "__main__":
             flow = get_oauth_flow()
             if flow:
                 try:
+                    oauth_context = _consume_oauth_context_payload(auth_state)
                     # Recupera il code_verifier dalla cache server-side usando lo state token
-                    if auth_state:
-                        cache = get_oauth_cache()
-                        if auth_state in cache:
-                            flow.code_verifier = cache[auth_state]
+                    if oauth_context.get("code_verifier"):
+                        flow.code_verifier = oauth_context["code_verifier"]
                             
                     flow.fetch_token(code=auth_code)
                     creds = flow.credentials
                     st.session_state.credentials = creds
+                    _ensure_session_user_email(creds)
                     
                     # Store as primitive dict to be completely safe with st.session_state
                     st.session_state.google_credentials = {
@@ -2337,8 +2423,8 @@ if __name__ == "__main__":
                     }
                     _save_persistent_credentials(creds)
                     
-                    # Clean up URL params so we don't re-trigger the auth flow
-                    st.query_params.clear()
+                    # Clean up OAuth params and restore safe client context.
+                    _restore_safe_post_auth_context(oauth_context)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Errore durante l'autenticazione: {e}")
@@ -2357,12 +2443,14 @@ if __name__ == "__main__":
             scopes=g_creds.get('scopes')
         )
         if st.session_state.credentials and st.session_state.credentials.valid:
+            _ensure_session_user_email(st.session_state.credentials)
             _save_persistent_credentials(st.session_state.credentials)
 
     # Keep credentials fresh across reruns.
     if st.session_state.credentials and st.session_state.credentials.expired and st.session_state.credentials.refresh_token:
         try:
             st.session_state.credentials.refresh(Request())
+            _ensure_session_user_email(st.session_state.credentials)
             _save_persistent_credentials(st.session_state.credentials)
             st.session_state.google_credentials = {
                 "token": st.session_state.credentials.token,
@@ -2382,6 +2470,3 @@ if __name__ == "__main__":
         if st.session_state.get("client_lock_error"):
             st.warning(st.session_state.get("client_lock_error"))
         show_login_page()
-
-
-

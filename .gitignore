@@ -35,3 +35,7 @@ Thumbs.db
 # IDEs
 .vscode/
 .idea/
+
+# Local planning docs
+docs/plans/
+.playwright-cli/
