@@ -5,6 +5,7 @@ Extracts structured UTM rule data from raw Excel/CSV rows at upload time.
 This logic runs ONCE when the user uploads a file, not at every page load.
 The extracted data is saved as typed arrays in the client config.
 """
+import html as html_lib
 import re
 from utm_normalize import normalize_token, normalize_medium_token
 

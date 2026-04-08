@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import streamlit as st
 import streamlit.components.v1 as components
 import re
@@ -211,7 +211,7 @@ def _extract_json_block_if_any(text: str) -> Optional[Dict[str, Any]]:
     """
     if not text or "utm_" not in text:
         return None
-    # trova il primo blocco {...} “ampio”
+    # trova il primo blocco {...} "ampio"
     m = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if not m:
         return None
@@ -279,7 +279,7 @@ def clean_bot_response(text: str) -> str:
             final_url = _rebuild_url_with_encoded_query(final_url)
             return "Copia e incolla questo link completo:\n" + final_url
 
-    # Se il testo include un URL, prova a “ripulire” e re-encodare solo quello
+    # Se il testo include un URL, prova a "ripulire" e re-encodare solo quello
     url_in_text = _extract_first_url(text)
     if url_in_text:
         norm = _normalize_destination_url(url_in_text)
@@ -295,8 +295,8 @@ def clean_bot_response(text: str) -> str:
         fixed = urlunparse((p.scheme, p.netloc, p.path, p.params, encoded, p.fragment))
         fixed = _rebuild_url_with_encoded_query(fixed)
 
-        # Se il bot ha scritto testo + url, mantieni solo l’istruzione + url
-        # (per rispettare la richiesta “output solo link”)
+        # Se il bot ha scritto testo + url, mantieni solo l'istruzione + url
+        # (per rispettare la richiesta "output solo link")
         if "utm_" in fixed:
             return "Copia e incolla questo link completo:\n" + fixed
 
