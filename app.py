@@ -2386,7 +2386,7 @@ if __name__ == "__main__":
             st.session_state.client_lock_error = lock_error
             st.session_state.client_id_lock = ""
 
-    # Restore persisted credentials only for a user already bound to this session.
+    # Session-scoped auth only: do not resume credentials from shared server storage.
     if st.session_state.credentials is None and st.session_state.get("user_email"):
         persisted_creds = _load_persistent_credentials()
         if persisted_creds:
@@ -2446,7 +2446,7 @@ if __name__ == "__main__":
             _ensure_session_user_email(st.session_state.credentials)
             _save_persistent_credentials(st.session_state.credentials)
 
-    # Keep credentials fresh across reruns.
+    # Keep credentials fresh inside the current Streamlit session.
     if st.session_state.credentials and st.session_state.credentials.expired and st.session_state.credentials.refresh_token:
         try:
             st.session_state.credentials.refresh(Request())

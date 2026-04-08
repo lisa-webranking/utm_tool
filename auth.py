@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Optional
 
 import streamlit as st
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
 logger = logging.getLogger(__name__)
@@ -76,41 +75,24 @@ def build_oauth_flow(
 
 
 def save_credentials(creds: Credentials, cred_store, legacy_path: Path) -> None:
-    """Persist OAuth credentials only for a known user-bound session.
+    """Do not persist OAuth credentials outside the active browser session.
 
-    legacy_path is kept only for cleanup compatibility. New logins must never
-    fall back to a global token file shared across anonymous sessions.
+    The app now treats Google auth as strictly session-scoped. Keeping refresh
+    tokens in server-side storage made session isolation ambiguous and could
+    leak one operator's authenticated state into a later visit. The legacy
+    path is kept only so logout can remove stale tokens created by older
+    versions.
     """
-    email = str(st.session_state.get("user_email", "") or "").strip().lower()
-    if not email:
-        logger.info("Skipping credential persistence because user_email is not resolved yet")
-        return
-    try:
-        cred_store.save_token(email, creds.to_json())
-    except Exception:
-        logger.debug("Failed to save credentials to per-user store", exc_info=True)
+    logger.debug("Skipping credential persistence: auth is session-scoped only")
 
 
 def load_credentials(cred_store, legacy_path: Path) -> Optional[Credentials]:
-    """Load and auto-refresh persisted OAuth credentials for a known user only."""
-    email = str(st.session_state.get("user_email", "") or "").strip().lower()
-    if not email:
-        return None
+    """Never restore credentials from server-side persistence.
 
-    token_json = cred_store.load_token(email)
-    if not token_json:
-        return None
-    try:
-        creds = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
-        if creds and creds.valid:
-            return creds
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            cred_store.save_token(email, creds.to_json())
-            return creds
-    except Exception:
-        logger.debug("Failed to load/refresh credentials", exc_info=True)
-        return None
+    A fresh browser session must always start anonymous and complete its own
+    OAuth flow. This keeps authentication ownership aligned with the current
+    visitor instead of any previously persisted token.
+    """
     return None
 
 
