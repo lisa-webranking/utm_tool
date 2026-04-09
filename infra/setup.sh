@@ -50,6 +50,24 @@ REGISTRY="${REGION}-docker.pkg.dev"
 IMAGE="${REGISTRY}/${PROJECT_ID}/${SERVICE_NAME}/${SERVICE_NAME}"
 SA_NAME="${SERVICE_NAME}-runner"
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! git -C "${REPO_ROOT}" diff --quiet --ignore-submodules -- || \
+   ! git -C "${REPO_ROOT}" diff --cached --quiet --ignore-submodules --; then
+    echo "ERROR: Refusing to deploy from a dirty worktree."
+    echo "Commit or stash tracked changes first so the built image matches a real commit."
+    exit 1
+fi
+
+SOURCE_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+SOURCE_SHA_SHORT="$(git -C "${REPO_ROOT}" rev-parse --short=12 HEAD)"
+BUILD_DIR="$(mktemp -d)"
+
+cleanup() {
+    rm -rf "${BUILD_DIR}"
+}
+
+trap cleanup EXIT
 
 echo ""
 echo "=== UTM Tool — GCP Setup (Firestore) ==="
@@ -57,6 +75,7 @@ echo "  Project:    ${PROJECT_ID}"
 echo "  Region:     ${REGION}"
 echo "  Service:    ${SERVICE_NAME}"
 echo "  Registry:   ${IMAGE}"
+echo "  Source SHA: ${SOURCE_SHA_SHORT}"
 echo ""
 
 if [[ "$SKIP_CONFIRM" != true ]]; then
@@ -130,12 +149,15 @@ create_or_update_secret() {
     fi
 }
 
-# CLIENT_LINK_SECRET — generate random
-LINK_SECRET=$(openssl rand -base64 32)
-create_or_update_secret "${SERVICE_NAME}-client-link-secret" "${LINK_SECRET}"
+# CLIENT_LINK_SECRET — create once, keep stable across redeploys
+if gcloud secrets describe "${SERVICE_NAME}-client-link-secret" --format="value(name)" 2>/dev/null; then
+    echo "  Reusing: ${SERVICE_NAME}-client-link-secret"
+else
+    LINK_SECRET=$(openssl rand -base64 32)
+    create_or_update_secret "${SERVICE_NAME}-client-link-secret" "${LINK_SECRET}"
+fi
 
 # OAuth client_secrets.json
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -f "${REPO_ROOT}/client_secrets.json" ]]; then
     if gcloud secrets describe "${SERVICE_NAME}-oauth-client" --format="value(name)" 2>/dev/null; then
         gcloud secrets versions add "${SERVICE_NAME}-oauth-client" \
@@ -184,12 +206,16 @@ echo "  Firestore access granted."
 # 6. Build & push container
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- 6/7 Build & Push ---"
+echo "--- 6/7 Build & Push (${SOURCE_SHA_SHORT}) ---"
 gcloud auth configure-docker "${REGISTRY}" --quiet
 
-docker build -t "${IMAGE}:latest" "${REPO_ROOT}"
-docker push "${IMAGE}:latest"
-echo "  Pushed: ${IMAGE}:latest"
+git -C "${REPO_ROOT}" archive HEAD | tar -x -C "${BUILD_DIR}"
+
+docker build -t "${IMAGE}:${SOURCE_SHA}" "${BUILD_DIR}"
+docker push "${IMAGE}:${SOURCE_SHA}"
+IMAGE_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${SOURCE_SHA}")"
+echo "  Pushed: ${IMAGE}:${SOURCE_SHA_SHORT}"
+echo "  Digest: ${IMAGE_DIGEST}"
 
 # ---------------------------------------------------------------------------
 # 7. Deploy to Cloud Run
@@ -198,7 +224,7 @@ echo ""
 echo "--- 7/7 Deploy to Cloud Run ---"
 
 gcloud run deploy "${SERVICE_NAME}" \
-    --image="${IMAGE}:latest" \
+    --image="${IMAGE_DIGEST}" \
     --region="${REGION}" \
     --platform=managed \
     --service-account="${SA_EMAIL}" \
@@ -226,7 +252,8 @@ echo "  Deploy complete!"
 echo ""
 echo "  URL:        ${SERVICE_URL}"
 echo "  Firestore:  Native mode (${REGION})"
-echo "  Registry:   ${IMAGE}"
+echo "  Registry:   ${IMAGE_DIGEST}"
+echo "  Source SHA: ${SOURCE_SHA}"
 echo ""
 echo "  Next steps:"
 echo "    1. Add these to Google Cloud Console > Credentials:"

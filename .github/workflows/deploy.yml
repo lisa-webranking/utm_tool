@@ -5,11 +5,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: utm-tool-production
+  cancel-in-progress: true
+
 env:
   PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
   REGION: europe-west8
   SERVICE_NAME: utm-tool
   REGISTRY: europe-west8-docker.pkg.dev
+  HAS_WIF_PROVIDER: ${{ vars.WIF_PROVIDER != '' }}
+  HAS_WIF_SERVICE_ACCOUNT: ${{ vars.WIF_SERVICE_ACCOUNT != '' }}
+  HAS_GCP_SA_KEY: ${{ secrets.GCP_SA_KEY != '' }}
 
 jobs:
   deploy:
@@ -21,35 +28,68 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - id: auth
+      - name: Validate auth configuration
+        run: |
+          if [[ -z "${PROJECT_ID}" ]]; then
+            echo "::error title=Missing deploy variable::GitHub Actions variable GCP_PROJECT_ID is not configured."
+            exit 1
+          fi
+          if [[ "${HAS_WIF_PROVIDER}" == "true" && "${HAS_WIF_SERVICE_ACCOUNT}" == "true" ]]; then
+            echo "Using Workload Identity Federation."
+            exit 0
+          fi
+          if [[ "${HAS_GCP_SA_KEY}" == "true" ]]; then
+            echo "Using credentials_json fallback."
+            exit 0
+          fi
+          echo "::error title=Missing deploy credentials::Configure either repository variables WIF_PROVIDER + WIF_SERVICE_ACCOUNT, or the repository secret GCP_SA_KEY."
+          exit 1
+
+      - id: auth-wif
+        if: ${{ env.HAS_WIF_PROVIDER == 'true' && env.HAS_WIF_SERVICE_ACCOUNT == 'true' }}
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
 
+      - id: auth-key
+        if: ${{ !(env.HAS_WIF_PROVIDER == 'true' && env.HAS_WIF_SERVICE_ACCOUNT == 'true') && env.HAS_GCP_SA_KEY == 'true' }}
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
       - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Derive image refs
+        id: image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}/${{ env.SERVICE_NAME }}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
 
       - name: Build and push container
+        id: build
         run: |
-          IMAGE=${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}/${{ env.SERVICE_NAME }}
-          docker build -t ${IMAGE}:${{ github.sha }} -t ${IMAGE}:latest .
-          docker push ${IMAGE}:${{ github.sha }}
-          docker push ${IMAGE}:latest
+          IMAGE="${{ steps.image.outputs.image }}"
+          TAG="${{ steps.image.outputs.tag }}"
+          docker build -t "${IMAGE}:${TAG}" .
+          docker push "${IMAGE}:${TAG}"
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${TAG}")"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy to Cloud Run
         run: |
-          IMAGE=${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
           gcloud run deploy ${{ env.SERVICE_NAME }} \
-            --image ${IMAGE} \
+            --image "${{ steps.build.outputs.digest }}" \
             --region ${{ env.REGION }} \
             --platform managed \
             --quiet
 
-      - name: Show service URL
+      - name: Show deployed revision
         run: |
           gcloud run services describe ${{ env.SERVICE_NAME }} \
             --region ${{ env.REGION }} \
-            --format 'value(status.url)'
+            --format 'table(status.latestReadyRevisionName,spec.template.spec.containers[0].image,status.url)'
