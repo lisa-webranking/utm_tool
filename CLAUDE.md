@@ -79,7 +79,7 @@ Streamlit application for UTM link governance with GA4 integration and a Gemini-
 ### Chatbot UI (`chatbot_ui.py`)
 - Renders the "WR Assistant" inline chat widget in the right column of the Generator tab
 - URL normalization, UTM value sanitization, and LLM output cleaning utilities (`clean_bot_response`, `_dedupe_repetitions`, `_normalize_destination_url`)
-- `get_gemini_response_safe()` tries multiple Gemini models in fallback order (2.0-flash → 1.5-flash → 1.5-pro → 1.0-pro)
+- `get_gemini_response_safe()` tries a current fallback order centered on `gemini-2.5-flash` / `gemini-flash-latest` / `gemini-2.5-flash-lite` / `gemini-2.5-pro`
 - Registers GA4 tool functions (list properties, run reports, guess property from URL) for Gemini's automatic function calling
 - System instruction defines an 8-step conversational flow for UTM link creation
 - Expects `st.session_state["gemini_api_key"]` to be injected from server-side config before chat execution

@@ -16,6 +16,41 @@ from utm_normalize import sanitize_utm_value as _sanitize_utm_value
 logger = logging.getLogger(__name__)
 
 
+CHATBOT_GEMINI_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-flash-latest",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+]
+
+
+def _is_invalid_key_error(msg: str) -> bool:
+    return "api key" in msg or "api_key" in msg or ("invalid" in msg and "key" in msg)
+
+
+def _is_permission_error(msg: str) -> bool:
+    return "permission" in msg or "403" in msg or "forbidden" in msg
+
+
+def _is_model_not_found_error(msg: str) -> bool:
+    return (
+        "404" in msg
+        or "not found" in msg
+        or "not supported" in msg
+        or "no longer available" in msg
+    )
+
+
+def _is_quota_error(msg: str) -> bool:
+    return (
+        "429" in msg
+        or "quota" in msg
+        or "resource exhausted" in msg
+        or "rate limit" in msg
+        or "too many requests" in msg
+    )
+
+
 def _dedupe_repetitions(text: str) -> str:
     """
     Riduce ripetizioni accidentali tipiche dei LLM:
@@ -933,20 +968,25 @@ def _classify_gemini_error(error: Exception) -> str:
     """Return a user-friendly Italian message based on the error type."""
     msg = str(error).lower()
 
-    if "api key" in msg or "api_key" in msg or "invalid" in msg and "key" in msg:
+    if _is_invalid_key_error(msg):
         return (
-            "Chiave API non valida. "
-            "Controlla la tua chiave Gemini nelle impostazioni (icona ingranaggio)."
+            "Chiave Gemini di sistema non valida o scaduta. "
+            "Contatta l'amministratore del tool."
         )
-    if "permission" in msg or "403" in msg or "forbidden" in msg:
+    if _is_permission_error(msg):
         return (
-            "Permesso negato. La chiave API potrebbe non avere accesso ai modelli Gemini. "
-            "Verifica nella Google AI Studio che la chiave sia attiva."
+            "Accesso ai modelli Gemini non autorizzato per la chiave di sistema. "
+            "Contatta l'amministratore del tool."
         )
-    if "quota" in msg or "429" in msg or "rate" in msg or "resource exhausted" in msg:
+    if _is_model_not_found_error(msg):
         return (
-            "Limite di utilizzo raggiunto per la chiave API. "
-            "Riprova tra qualche minuto o verifica la quota nella Google AI Studio."
+            "La configurazione del modello Gemini del tool non e aggiornata. "
+            "Contatta l'amministratore del tool."
+        )
+    if _is_quota_error(msg):
+        return (
+            "Limite di utilizzo raggiunto per il servizio AI condiviso. "
+            "Riprova tra qualche minuto o contatta l'amministratore del tool se il problema persiste."
         )
     if "500" in msg or "internal" in msg or "unavailable" in msg or "503" in msg:
         return (
@@ -973,14 +1013,7 @@ def get_gemini_response_safe(
     Ritorna: (testo, nome_modello)
     Raises GeminiError con messaggio user-friendly.
     """
-    models_to_try = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-001",
-        "gemini-1.5-pro",
-        "gemini-1.0-pro",
-        "gemini-pro",
-    ]
+    models_to_try = CHATBOT_GEMINI_MODELS
 
     last_error = None
 
@@ -1005,13 +1038,13 @@ def get_gemini_response_safe(
             error_str = str(e).lower()
 
             # Model not available — try next
-            if "404" in error_str or "not found" in error_str or "not supported" in error_str:
+            if _is_model_not_found_error(error_str):
                 continue
             # Auth/permission error — no point trying other models
-            if "api key" in error_str or "permission" in error_str or "403" in error_str:
+            if _is_invalid_key_error(error_str) or _is_permission_error(error_str):
                 raise GeminiError(_classify_gemini_error(e)) from e
             # Quota/rate limit — no point trying other models
-            if "429" in error_str or "quota" in error_str or "resource exhausted" in error_str:
+            if _is_quota_error(error_str):
                 raise GeminiError(_classify_gemini_error(e)) from e
             # Other error — try next model
             continue
@@ -1558,6 +1591,4 @@ def render_chatbot_interface(
                     st.session_state.pending_user_text = None
 
                 st.rerun()
-
-
 
