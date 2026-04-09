@@ -15,6 +15,7 @@ import streamlit as st
 from google.oauth2.credentials import Credentials
 
 logger = logging.getLogger(__name__)
+BROWSER_SESSION_TOKEN_PREFIX = "browser_session:"
 
 SCOPES = [
     "https://www.googleapis.com/auth/analytics.readonly",
@@ -74,35 +75,53 @@ def build_oauth_flow(
     return flow
 
 
-def save_credentials(creds: Credentials, cred_store, legacy_path: Path) -> None:
-    """Do not persist OAuth credentials outside the active browser session.
+def _browser_session_token_key() -> str:
+    browser_session_id = str(st.session_state.get("browser_session_id", "") or "").strip()
+    if not browser_session_id:
+        return ""
+    return f"{BROWSER_SESSION_TOKEN_PREFIX}{browser_session_id}"
 
-    The app now treats Google auth as strictly session-scoped. Keeping refresh
-    tokens in server-side storage made session isolation ambiguous and could
-    leak one operator's authenticated state into a later visit. The legacy
-    path is kept only so logout can remove stale tokens created by older
-    versions.
-    """
-    logger.debug("Skipping credential persistence: auth is session-scoped only")
+
+def save_credentials(creds: Credentials, cred_store, legacy_path: Path) -> None:
+    """Persist OAuth credentials for the current browser session only."""
+    session_key = _browser_session_token_key()
+    if not session_key:
+        logger.debug("Skipping credential persistence: browser session id missing")
+        return
+    try:
+        cred_store.save_token(session_key, creds.to_json())
+    except Exception:
+        logger.exception("Failed to persist credentials for current browser session")
 
 
 def load_credentials(cred_store, legacy_path: Path) -> Optional[Credentials]:
-    """Never restore credentials from server-side persistence.
+    """Restore credentials for the current browser session only."""
+    session_key = _browser_session_token_key()
+    if not session_key:
+        return None
 
-    A fresh browser session must always start anonymous and complete its own
-    OAuth flow. This keeps authentication ownership aligned with the current
-    visitor instead of any previously persisted token.
-    """
-    return None
+    token_json = cred_store.load_token(session_key)
+    if not token_json:
+        return None
+
+    try:
+        token_info = json.loads(token_json)
+        return Credentials.from_authorized_user_info(token_info, scopes=SCOPES)
+    except Exception:
+        logger.exception("Failed to restore credentials for current browser session")
+        return None
 
 
 def logout(cred_store, legacy_path: Path) -> None:
     """Clear session and persisted credentials."""
     email = st.session_state.get("user_email", "")
-    for key in ("credentials", "user_email", "gemini_api_key", "google_credentials"):
+    session_key = _browser_session_token_key()
+    for key in ("credentials", "user_email", "gemini_api_key", "google_credentials", "browser_session_id"):
         st.session_state.pop(key, None)
     st.session_state.pop("ga4_accounts", None)
     st.session_state.pop("ga4_cache_user_email", None)
+    if session_key:
+        cred_store.delete_token(session_key)
     if email:
         cred_store.delete_token(email)
     try:

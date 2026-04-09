@@ -7,6 +7,7 @@ import streamlit.components.v1 as components
 import pandas as pd
 import os
 import json
+import secrets
 import hashlib
 import hmac
 from datetime import datetime, timedelta
@@ -30,7 +31,6 @@ from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Metr
 
 import google.generativeai as genai
 from googleapi import get_shared_gemini_api_key, get_user_email
-import ga4_mcp_tools # Import tools module
 from functools import partial
 from utm_normalize import (
     normalize_token, normalize_medium_token, normalize_client_id,
@@ -85,6 +85,8 @@ st.markdown(f"<style>{_css_path.read_text(encoding='utf-8')}</style>", unsafe_al
 
 # --- GOOGLE AUTH ---
 SCOPES = _auth.SCOPES
+BROWSER_SESSION_COOKIE_NAME = "wr_browser_session"
+BROWSER_SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 
 def get_oauth_flow():
@@ -616,11 +618,89 @@ def _ensure_session_user_email(creds: Optional[Credentials] = None) -> str:
     return resolved_email
 
 
+def _get_browser_session_cookie() -> str:
+    try:
+        return str(st.context.cookies.get(BROWSER_SESSION_COOKIE_NAME, "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _sync_browser_session_state_from_cookie() -> str:
+    browser_session_id = _get_browser_session_cookie()
+    if browser_session_id:
+        st.session_state.browser_session_id = browser_session_id
+        return browser_session_id
+
+    if "browser_session_id" not in st.session_state:
+        st.session_state.browser_session_id = ""
+    return str(st.session_state.get("browser_session_id", "") or "").strip()
+
+
+def _ensure_browser_session_id() -> str:
+    existing = _sync_browser_session_state_from_cookie()
+    if existing:
+        return existing
+
+    browser_session_id = secrets.token_urlsafe(32)
+    st.session_state.browser_session_id = browser_session_id
+    return browser_session_id
+
+
+def _queue_browser_session_cookie(action: str, session_id: str = "") -> None:
+    st.session_state.browser_session_cookie_sync = {
+        "action": action,
+        "session_id": session_id,
+    }
+
+
+def _render_browser_session_cookie_sync() -> None:
+    payload = st.session_state.pop("browser_session_cookie_sync", None)
+    if not isinstance(payload, dict):
+        return
+
+    action = str(payload.get("action", "") or "").strip().lower()
+    session_id = str(payload.get("session_id", "") or "").strip()
+    cookie_name = json.dumps(BROWSER_SESSION_COOKIE_NAME)
+    cookie_value = json.dumps(session_id)
+    max_age = int(BROWSER_SESSION_COOKIE_MAX_AGE)
+
+    components.html(
+        f"""
+        <script>
+        (function () {{
+          const parentWindow = window.parent || window;
+          const doc = parentWindow.document || document;
+          const isHttps = (parentWindow.location && parentWindow.location.protocol) === "https:";
+          const baseAttrs = ["path=/", "SameSite=Lax"];
+          if (isHttps) baseAttrs.push("Secure");
+          const cookieName = {cookie_name};
+          const cookieValue = {cookie_value};
+          const action = {json.dumps(action)};
+
+          if (action === "set" && cookieValue) {{
+            doc.cookie = cookieName + "=" + encodeURIComponent(cookieValue) + "; Max-Age={max_age}; " + baseAttrs.join("; ");
+          }}
+
+          if (action === "clear") {{
+            doc.cookie = cookieName + "=; Max-Age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT; " + baseAttrs.join("; ");
+          }}
+        }})();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
 def _save_persistent_credentials(creds: Credentials) -> None:
+    browser_session_id = _ensure_browser_session_id()
     _auth.save_credentials(creds, _cred_store, TOKEN_FILE_PATH)
+    if browser_session_id and _get_browser_session_cookie() != browser_session_id:
+        _queue_browser_session_cookie("set", browser_session_id)
 def _load_persistent_credentials() -> Optional[Credentials]:
     return _auth.load_credentials(_cred_store, TOKEN_FILE_PATH)
 def _logout_current_user() -> None:
+    _queue_browser_session_cookie("clear")
     _auth.logout(_cred_store, TOKEN_FILE_PATH)
 # --- LOGIN PAGE ---
 def show_login_page():
@@ -705,8 +785,6 @@ def show_dashboard():
         if hasattr(st, "popover"):
             with st.popover("Account", use_container_width=True):
                 st.caption(st.session_state.get("user_email", ""))
-                if st.button("Impostazioni", key="settings_btn_menu", use_container_width=True):
-                    st.session_state.show_settings = True
                 if st.button("Logout", key="logout_btn", use_container_width=True):
                     _logout_current_user()
                     st.rerun()
@@ -714,40 +792,10 @@ def show_dashboard():
             if st.button("Account â–¾", key="user_menu_btn", use_container_width=True):
                 st.session_state.show_user_menu = not st.session_state.show_user_menu
             if st.session_state.show_user_menu:
-                if st.button("Impostazioni", key="settings_btn_menu_fallback", use_container_width=True):
-                    st.session_state.show_settings = not st.session_state.get("show_settings", False)
-                    st.session_state.show_user_menu = False
                 if st.button("Logout", key="logout_btn_fallback", use_container_width=True):
+                    st.session_state.show_user_menu = False
                     _logout_current_user()
                     st.rerun()
-
-    # --- SETTINGS MODAL ---
-    if st.session_state.get("show_settings", False):
-        st.markdown('<div class="form-card">', unsafe_allow_html=True)
-        s_col1, s_col2 = st.columns([0.92, 0.08])
-        with s_col1:
-            st.markdown("### Impostazioni")
-        with s_col2:
-            if st.button("X", key="close_settings_top", help="Chiudi impostazioni", use_container_width=True):
-                st.session_state.show_settings = False
-                st.rerun()
-        with st.container():
-            st.markdown("### Configurazione Gemini")
-            st.markdown(f"**Account:** {st.session_state.user_email}")
-
-            current_key = st.session_state.get("gemini_api_key", "")
-            key_status = "Configurata" if current_key else "Non configurata"
-            st.markdown(f"**Stato Gemini:** {key_status}")
-
-            if current_key:
-                st.caption("La chiave Gemini e gestita lato sistema e non puo essere modificata dall'utente.")
-            else:
-                st.error("La chiave Gemini non e configurata lato sistema. Verifica il secret GEMINI_API_KEY su Cloud Run.")
-
-            if st.button("Chiudi", key="close_settings_bottom", use_container_width=True):
-                st.session_state.show_settings = False
-                st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown(
         """
@@ -2349,11 +2397,15 @@ if __name__ == "__main__":
             st.session_state.client_lock_error = lock_error
             st.session_state.client_id_lock = ""
 
-    # Session-scoped auth only: do not resume credentials from shared server storage.
-    if st.session_state.credentials is None and st.session_state.get("user_email"):
+    _sync_browser_session_state_from_cookie()
+
+    if st.session_state.credentials is None and st.session_state.get("browser_session_id"):
         persisted_creds = _load_persistent_credentials()
         if persisted_creds:
             st.session_state.credentials = persisted_creds
+        else:
+            st.session_state.browser_session_id = ""
+            _queue_browser_session_cookie("clear")
 
     # OAuth callback for unauthenticated sessions.
     if not st.session_state.credentials:
@@ -2433,3 +2485,4 @@ if __name__ == "__main__":
         if st.session_state.get("client_lock_error"):
             st.warning(st.session_state.get("client_lock_error"))
         show_login_page()
+    _render_browser_session_cookie_sync()

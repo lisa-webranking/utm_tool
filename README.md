@@ -7,7 +7,8 @@ A powerful Streamlit application to generate, manage, and validate UTM links wit
 - **UTM Checker**: Validate existing links for HTTPS, length, and mandatory parameters.
 - **AI Assistant**: Gemini-powered chat (Bot-style UI) using a shared server-side Gemini key to analyze GA4 data with MCP tools.
 - **GA4 Integration**: Fetch real traffic sources and property data directly from your account.
-- **Session-scoped auth**: each person logs in with their own Google account, shared links carry client context only.
+- **Same-browser auth persistence**: each person logs in with their own Google account, shared links carry client context only, and login is restored only in the same browser/device.
+- **Minimal account menu**: the authenticated UI exposes logout only; Gemini and GA4 runtime settings are system-managed.
 
 ## Local setup
 1. Clone the repository.
@@ -69,6 +70,7 @@ Regression checks currently in repo:
 ```bash
 python -m unittest \
   tests/test_auth_session_isolation.py \
+  tests/test_account_menu_ui.py \
   tests/test_gemini_config.py \
   tests/test_gemini_deploy_config.py
 ```

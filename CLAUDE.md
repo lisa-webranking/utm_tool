@@ -17,6 +17,7 @@ There is a small `unittest` regression suite. Run:
 ```bash
 python -m unittest \
   tests/test_auth_session_isolation.py \
+  tests/test_account_menu_ui.py \
   tests/test_gemini_config.py \
   tests/test_gemini_deploy_config.py
 ```
@@ -60,13 +61,13 @@ Manual/fresh-project bootstrap: `infra/setup.sh`.
 Streamlit application for UTM link governance with GA4 integration and a Gemini-powered AI assistant. The UI is in Italian.
 
 ### Entry Point (`app.py` — ~200KB, monolithic)
-- Google OAuth 2.0 login flow with PKCE and session-scoped auth; server-side credential restore is intentionally disabled
+- Google OAuth 2.0 login flow with PKCE and same-browser auth persistence; credentials are restored only when the browser presents the first-party session cookie and the matching server-side token exists
 - Two main tabs: **UTM Generator** (builder with real-time validation) and **UTM Checker** (URL parameter analysis)
 - GA4 account/property selection and live traffic source fetching
 - `GUIDE_TABLE_DATA` — channel mapping table that drives source/medium recommendations
 - Uses `st.session_state` extensively for auth credentials, GA4 accounts, chat messages, and shared Gemini key state
 - Extensive inline CSS (~300 lines) for custom "Loveable" design system using CSS variables
-- Settings modal is status-only for Gemini and does not expose per-user key entry or GA4 connection test buttons
+- Account controls expose logout only; there is no user-facing settings modal anymore
 
 ### Client Config System (`client_configs/`)
 - Per-client JSON files (e.g., `chicco_2023.json`, `ovs.json`) containing UTM rules imported from Excel
@@ -104,6 +105,7 @@ Streamlit application for UTM link governance with GA4 integration and a Gemini-
 - Campaign naming pattern: `Country_Type_Name_Date_CTA` (date format YYYYMMDD in builder, DD-MM-YYYY in chatbot)
 - URLs are normalized to `https://www.` prefix by the chatbot
 - Client config IDs are normalized with `normalize_client_id()` before filesystem operations
+- OAuth persistence is scoped to the same browser through a first-party `wr_browser_session` cookie plus a matching server-side credential record
 - Shared Gemini access is system-managed through `GEMINI_API_KEY`, not user-supplied through the UI
 - Sensitive files (`token.json`, `client_secrets.json`, `.streamlit/secrets.toml`) are in `.gitignore`
 - Source encoding is `latin-1` (declared in app.py header) due to Italian characters in inline strings
