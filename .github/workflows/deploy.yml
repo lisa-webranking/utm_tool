@@ -62,10 +62,18 @@ jobs:
 
       - name: Derive image refs
         id: image
+        env:
+          GEMINI_SECRET_ID_OVERRIDE: ${{ vars.GEMINI_SECRET_ID }}
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}/${{ env.SERVICE_NAME }}"
+          if [[ -n "${GEMINI_SECRET_ID_OVERRIDE}" ]]; then
+            GEMINI_SECRET_ID="${GEMINI_SECRET_ID_OVERRIDE}"
+          else
+            GEMINI_SECRET_ID="${PROJECT_ID}_gemini_api-key"
+          fi
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
           echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "gemini_secret_id=${GEMINI_SECRET_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
@@ -86,6 +94,7 @@ jobs:
             --image "${{ steps.build.outputs.digest }}" \
             --region ${{ env.REGION }} \
             --platform managed \
+            --update-secrets "GEMINI_API_KEY=${{ steps.image.outputs.gemini_secret_id }}:latest" \
             --quiet
 
       - name: Show deployed revision

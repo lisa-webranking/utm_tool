@@ -29,7 +29,7 @@ from google.analytics.data import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Metric, Dimension, OrderBy
 
 import google.generativeai as genai
-from googleapi import get_persistent_api_key, save_persistent_api_key, get_user_email
+from googleapi import get_shared_gemini_api_key, get_user_email
 import ga4_mcp_tools # Import tools module
 from functools import partial
 from utm_normalize import (
@@ -676,10 +676,7 @@ def show_dashboard():
                 st.session_state.pop(k, None)
         st.session_state["ga4_cache_user_email"] = current_user_email
     
-    if "gemini_api_key" not in st.session_state:
-        # Try to load saved API key for this user
-        saved_key = get_persistent_api_key(st.session_state.user_email)
-        st.session_state.gemini_api_key = saved_key
+    st.session_state.gemini_api_key = get_shared_gemini_api_key(_get_config_value)
     
     # --- HEADER PRINCIPALE ---
     if "show_user_menu" not in st.session_state:
@@ -729,61 +726,27 @@ def show_dashboard():
         st.markdown('<div class="form-card">', unsafe_allow_html=True)
         s_col1, s_col2 = st.columns([0.92, 0.08])
         with s_col1:
-            st.markdown("### ⚙️ Impostazioni")
+            st.markdown("### Impostazioni")
         with s_col2:
-            if st.button("✕", key="close_settings_top", help="Chiudi impostazioni", use_container_width=True):
+            if st.button("X", key="close_settings_top", help="Chiudi impostazioni", use_container_width=True):
                 st.session_state.show_settings = False
                 st.rerun()
         with st.container():
-            st.markdown("### Configurazione Gemini API")
+            st.markdown("### Configurazione Gemini")
             st.markdown(f"**Account:** {st.session_state.user_email}")
-            
+
             current_key = st.session_state.get("gemini_api_key", "")
-            key_status = "✅ Configurata" if current_key else "❌ Non configurata"
-            st.markdown(f"**Stato API Key:** {key_status}")
-            
-            with st.form("api_key_form"):
-                new_api_key = st.text_input(
-                    "Gemini API Key",
-                    value=current_key if current_key else "",
-                    type="password",
-                    help="Inserisci la tua chiave API di Google Gemini"
-                )
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    save_btn = st.form_submit_button("💾 Salva", use_container_width=True)
-                with col2:
-                    close_btn = st.form_submit_button("Chiudi", use_container_width=True)
-                
-                if save_btn and new_api_key:
-                    st.session_state.gemini_api_key = new_api_key
-                    save_persistent_api_key(st.session_state.user_email, new_api_key)
-                    st.success("✅ API Key salvata con successo!")
-                    st.session_state.show_settings = False
-                    st.rerun()
-                
-                if close_btn:
-                    st.session_state.show_settings = False
-                    st.rerun()
-            
-            # --- GA4 Diagnostics ---
-            st.markdown("---")
-            st.markdown("### 🔌 Connessione GA4")
-            if st.button("🔁 Test connessione GA4", key="test_ga4_btn"):
-                with st.spinner("Verifica connessione GA4..."):
-                    result = ga4_mcp_tools.get_account_summaries(st.session_state.credentials)
-                if isinstance(result, list) and len(result) > 0:
-                    st.success(f"✅ Connessione GA4 OK! Trovati {len(result)} account.")
-                elif isinstance(result, list) and len(result) == 0:
-                    st.warning("⚠️ Connessione OK ma nessun account GA4 trovato per questo utente.")
-                elif isinstance(result, dict) and "error" in result:
-                    error_type = result.get("error_type", "Sconosciuto")
-                    error_msg = result.get("error", "")
-                    st.error(f"�Errore GA4\n\n**Tipo:** {error_type}\n\n**Dettaglio:** {error_msg}")
-                    if any(kw in error_msg.lower() for kw in ["credentials", "scope", "permission", "unauthenticated", "unauthorized", "403", "401"]):
-                        st.warning("💡 Il token OAuth potrebbe avere scope insufficienti. Prova a fare **Logout** e ri-accedere con Google.")
-                else:
-                    st.info(f"Risposta inattesa: {result}")
+            key_status = "Configurata" if current_key else "Non configurata"
+            st.markdown(f"**Stato Gemini:** {key_status}")
+
+            if current_key:
+                st.caption("La chiave Gemini e gestita lato sistema e non puo essere modificata dall'utente.")
+            else:
+                st.error("La chiave Gemini non e configurata lato sistema. Verifica il secret GEMINI_API_KEY su Cloud Run.")
+
+            if st.button("Chiudi", key="close_settings_bottom", use_container_width=True):
+                st.session_state.show_settings = False
+                st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown(
@@ -2342,7 +2305,7 @@ def show_dashboard():
     # --- RENDER GLOBALLY (FLOATING) ---
     render_chatbot_interface(
         st.session_state.credentials,
-        get_persistent_api_key,
+        None,
         save_chatbot_url_to_history,
         client_rules_text=st.session_state.get("active_client_rules_text", ""),
         preferred_property_id=st.session_state.get("builder_selected_property_id", ""),

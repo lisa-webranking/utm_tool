@@ -1344,7 +1344,7 @@ def render_chatbot_interface(
                         api_key = st.session_state.get("gemini_api_key")
                         if not api_key:
                             st.session_state.messages.append(
-                                {"role": "assistant", "content": "Configura prima la API Key nelle impostazioni."}
+                                {"role": "assistant", "content": "La chiave Gemini non e configurata lato sistema. Contatta l'amministratore del tool."}
                             )
                         else:
                             genai.configure(api_key=api_key)
@@ -1542,7 +1542,7 @@ def render_chatbot_interface(
                                         )
                                         if saved:
                                             if hasattr(st, "toast"):
-                                                st.toast("Link salvato nello storico UTM", icon="✅")
+                                                st.toast("Link salvato nello storico UTM")
                                             else:
                                                 st.success("Link salvato nello storico UTM.")
                                 except Exception:
@@ -1558,7 +1558,6 @@ def render_chatbot_interface(
                     st.session_state.pending_user_text = None
 
                 st.rerun()
-
 
 
 

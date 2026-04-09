@@ -1,7 +1,7 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-Keep this file aligned with auth, runtime config, and deploy behavior. Other coding agents rely on it as operational context.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+Keep this file aligned with auth, runtime config, and deploy behavior. Other Codex users rely on it as operational context.
 
 ## Running the App
 

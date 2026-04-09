@@ -11,6 +11,7 @@
 #   - Docker running locally
 #   - client_secrets.json from Google Cloud Console (OAuth 2.0 Web Client ID)
 #     OR secrets configured in .streamlit/secrets.toml
+#   - Optional for non-interactive bootstrap: GEMINI_API_KEY environment variable
 #
 # Usage:
 #   ./infra/setup.sh                          # Interactive — prompts for project ID
@@ -50,6 +51,7 @@ REGISTRY="${REGION}-docker.pkg.dev"
 IMAGE="${REGISTRY}/${PROJECT_ID}/${SERVICE_NAME}/${SERVICE_NAME}"
 SA_NAME="${SERVICE_NAME}-runner"
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+GEMINI_SECRET_ID="${GEMINI_SECRET_ID:-${PROJECT_ID}_gemini_api-key}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if ! git -C "${REPO_ROOT}" diff --quiet --ignore-submodules -- || \
@@ -149,6 +151,29 @@ create_or_update_secret() {
     fi
 }
 
+ensure_gemini_secret() {
+    if gcloud secrets describe "${GEMINI_SECRET_ID}" --format="value(name)" 2>/dev/null; then
+        echo "  Reusing: ${GEMINI_SECRET_ID}"
+        return
+    fi
+
+    local gemini_api_key="${GEMINI_API_KEY:-}"
+    if [[ -z "${gemini_api_key}" && "${SKIP_CONFIRM}" != true ]]; then
+        echo "  Shared Gemini secret not found."
+        echo "  Enter the Gemini API key to create ${GEMINI_SECRET_ID}:"
+        read -rs gemini_api_key
+        echo ""
+    fi
+
+    if [[ -z "${gemini_api_key}" ]]; then
+        echo "  ERROR: Missing Gemini secret ${GEMINI_SECRET_ID}."
+        echo "  Create it in Secret Manager or provide GEMINI_API_KEY for non-interactive bootstrap."
+        exit 1
+    fi
+
+    create_or_update_secret "${GEMINI_SECRET_ID}" "${gemini_api_key}"
+}
+
 # CLIENT_LINK_SECRET — create once, keep stable across redeploys
 if gcloud secrets describe "${SERVICE_NAME}-client-link-secret" --format="value(name)" 2>/dev/null; then
     echo "  Reusing: ${SERVICE_NAME}-client-link-secret"
@@ -174,6 +199,8 @@ else
     echo "      --data-file=client_secrets.json --replication-policy=automatic"
 fi
 
+ensure_gemini_secret
+
 # ---------------------------------------------------------------------------
 # 5. Service Account + IAM
 # ---------------------------------------------------------------------------
@@ -189,7 +216,7 @@ else
 fi
 
 # Secret access
-for secret in "${SERVICE_NAME}-client-link-secret" "${SERVICE_NAME}-oauth-client"; do
+for secret in "${SERVICE_NAME}-client-link-secret" "${SERVICE_NAME}-oauth-client" "${GEMINI_SECRET_ID}"; do
     gcloud secrets add-iam-policy-binding "${secret}" \
         --member="serviceAccount:${SA_EMAIL}" \
         --role="roles/secretmanager.secretAccessor" --quiet 2>/dev/null
@@ -236,7 +263,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --cpu=1 \
     --timeout=300 \
     --set-env-vars="USE_FIRESTORE=1" \
-    --set-secrets="CLIENT_LINK_SECRET=${SERVICE_NAME}-client-link-secret:latest" \
+    --set-secrets="CLIENT_LINK_SECRET=${SERVICE_NAME}-client-link-secret:latest,GEMINI_API_KEY=${GEMINI_SECRET_ID}:latest" \
     --update-secrets="/secrets/oauth/client_secrets.json=${SERVICE_NAME}-oauth-client:latest" \
     --quiet
 
