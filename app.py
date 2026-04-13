@@ -2226,7 +2226,7 @@ def show_dashboard():
             if "cfg_expected_domain" not in st.session_state:
                 st.session_state.cfg_expected_domain = ""
             if "cfg_default_country" not in st.session_state:
-                st.session_state.cfg_default_country = "it"
+                st.session_state.cfg_default_country = ""
             if "cfg_rules_rows" not in st.session_state:
                 st.session_state.cfg_rules_rows = []
             if "cfg_rules_sheet_names" not in st.session_state:
@@ -2282,7 +2282,7 @@ def show_dashboard():
                 st.session_state.cfg_ga4_property_id = st.session_state.cfg_ga4_default_property_id
                 st.session_state.cfg_ga4_property_name = str(cfg_ga4_profile.get("ga4_default_property_name", "")).strip()
                 st.session_state.cfg_expected_domain = str(cfg.get("expected_domain", ""))
-                st.session_state.cfg_default_country = str(cfg.get("default_country", "it") or "it")
+                st.session_state.cfg_default_country = str(cfg.get("default_country", "") or "")
                 st.session_state.cfg_extracted = {
                     "sources": cfg.get("sources", []),
                     "mediums": cfg.get("mediums", []),
@@ -2308,7 +2308,7 @@ def show_dashboard():
                 st.session_state.cfg_ga4_property_id = ""
                 st.session_state.cfg_ga4_property_name = ""
                 st.session_state.cfg_expected_domain = ""
-                st.session_state.cfg_default_country = "it"
+                st.session_state.cfg_default_country = ""
                 st.session_state.cfg_extracted = {}
                 st.session_state.cfg_rules_rows = []
                 st.session_state.cfg_rules_sheet_names = []
@@ -2430,6 +2430,14 @@ def show_dashboard():
                             if sheet_df.empty:
                                 st.info("Foglio letto correttamente, ma senza righe dati utili da mostrare in anteprima.")
                             else:
+                                # Keep only columns that have at least one non-empty value in this sheet.
+                                non_empty_cols = []
+                                for col in sheet_df.columns:
+                                    col_vals = sheet_df[col].fillna("").astype(str).str.strip()
+                                    if (col_vals != "").any():
+                                        non_empty_cols.append(col)
+                                if non_empty_cols:
+                                    sheet_df = sheet_df[non_empty_cols].copy()
                                 st.dataframe(sheet_df.head(20), use_container_width=True, hide_index=True)
                                 if len(sheet_df) > 20:
                                     st.caption(f"Mostrate 20 righe su {len(sheet_df)} del foglio '{sheet_name}'.")
@@ -2660,7 +2668,7 @@ def show_dashboard():
                             "ga4_default_property_id": selected_default_pid,
                             "ga4_property_name": name_by_id.get(selected_default_pid, "") if selected_default_pid else "",
                             "ga4_property_id": selected_default_pid,
-                            "default_country": normalize_token(st.session_state.get("cfg_default_country", "")) or "it",
+                        "default_country": normalize_token(st.session_state.get("cfg_default_country", "")),
                             "expected_domain": str(st.session_state.get("cfg_expected_domain", "")).strip().lower(),
                             # Structured data from Excel parsing (no JSON blob)
                             "sources": extracted.get("sources", existing_cfg.get("sources", [])),
