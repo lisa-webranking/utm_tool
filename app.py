@@ -2372,12 +2372,6 @@ if __name__ == "__main__":
     if "builder_selected_client_id" not in st.session_state:
         st.session_state.builder_selected_client_id = ""
 
-    # Scopes setup for profile info
-    if 'https://www.googleapis.com/auth/userinfo.profile' not in SCOPES:
-        SCOPES.append('https://www.googleapis.com/auth/userinfo.profile')
-    if 'https://www.googleapis.com/auth/userinfo.email' not in SCOPES:
-        SCOPES.append('https://www.googleapis.com/auth/userinfo.email')
-
     # Lock cliente da query params firmati (persistente in sessione).
     raw_open_chat = str(st.query_params.get("open_chat", "")).strip().lower()
     if raw_open_chat in {"1", "true", "yes"}:

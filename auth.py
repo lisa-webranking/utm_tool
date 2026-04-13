@@ -17,12 +17,15 @@ from google.oauth2.credentials import Credentials
 logger = logging.getLogger(__name__)
 BROWSER_SESSION_TOKEN_PREFIX = "browser_session:"
 
-SCOPES = [
+# Keep OAuth scopes stable across authorization, callback, and credential restore.
+# Requesting both analytics.readonly and analytics.edit makes Google collapse the
+# granted scope set, which breaks the callback with a "Scope has changed" error.
+SCOPES = (
     "https://www.googleapis.com/auth/analytics.readonly",
-    "https://www.googleapis.com/auth/analytics.edit",
     "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
     "openid",
-]
+)
 
 
 def build_oauth_flow(
@@ -62,7 +65,7 @@ def build_oauth_flow(
     else:
         return None
 
-    flow = Flow.from_client_config(client_config, scopes=SCOPES)
+    flow = Flow.from_client_config(client_config, scopes=list(SCOPES))
 
     # redirect_uri: explicit override > st.secrets > localhost fallback
     redirect_uri = redirect_uri_override.strip() if redirect_uri_override else ""
@@ -106,7 +109,7 @@ def load_credentials(cred_store, legacy_path: Path) -> Optional[Credentials]:
 
     try:
         token_info = json.loads(token_json)
-        return Credentials.from_authorized_user_info(token_info, scopes=SCOPES)
+        return Credentials.from_authorized_user_info(token_info, scopes=list(SCOPES))
     except Exception:
         logger.exception("Failed to restore credentials for current browser session")
         return None
