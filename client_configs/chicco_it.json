@@ -1,0 +1,125 @@
+{
+  "client_id": "chicco_it",
+  "version": 1,
+  "created_at": "2026-04-13 10:00:05",
+  "updated_by": "lisa.saccani@webranking.it",
+  "source_file_name": "W_Chicco_UTM Builder per Tool UTM (3).xlsx",
+  "source_file_sha256": "ebe99a080a1020d41507c3786087c18ff238363715ae5521c4935da8865e84c0",
+  "ga4_client_name": "Chicco - 2023",
+  "ga4_property_name": "01 - www.chicco.it",
+  "ga4_property_id": "273699696",
+  "default_country": "it",
+  "expected_domain": "https://www.chicco.it/",
+  "sources": [
+    "app",
+    "bing",
+    "direct",
+    "facebook",
+    "fb-messanger",
+    "google",
+    "ilsole24ore",
+    "instagram",
+    "manzoni",
+    "mediamond",
+    "newsletter",
+    "rai",
+    "rcs",
+    "reservation",
+    "sms",
+    "social-name",
+    "tradetracker",
+    "website-domain",
+    "yahoo",
+    "yandex",
+    "youtube"
+  ],
+  "mediums": [
+    "affiliate",
+    "app",
+    "cpc",
+    "cpm",
+    "cpv",
+    "email",
+    "none",
+    "organic",
+    "referral",
+    "sms",
+    "social_org",
+    "social_paid",
+    "utm_campaign",
+    "utm_content",
+    "utm_term"
+  ],
+  "campaign_types": [
+    "cj",
+    "editorial",
+    "newsletter-promotional",
+    "transactional"
+  ],
+  "campaign_notes": [
+    "Struttura Email Marketing: brandcountry_campaignType_campaignName_data Esempio:utm_campaign = chiccoitaly_promotional_cashback_21022023",
+    "Struttura Campagne ADV: country_campaignGoal_campaignName"
+  ],
+  "campaign_examples": [
+    "chiccoitaly-promotional-cashback-21022023",
+    "chiccoitaly-transactional-wishlist-backinstock-v3",
+    "chiccofrance-transactional-wishlist-backinstock-v3",
+    "chiccobelgium-transactional-wishlist-backinstock-v3-fr",
+    "chiccobelgium-transactional-wishlist-backinstock-v3-nl",
+    "cashback",
+    "loyalty-onboarding-subscribers",
+    "next2me",
+    "wishlist-backinstock",
+    "wishlist-backinstock-v3"
+  ],
+  "medium_source_map": {
+    "organic": [
+      "bing",
+      "google",
+      "yahoo",
+      "yandex"
+    ],
+    "referral": [
+      "website-domain"
+    ],
+    "cpc": [
+      "google"
+    ],
+    "affiliate": [
+      "tradetracker"
+    ],
+    "cpm": [
+      "ilsole24ore",
+      "manzoni",
+      "mediamond",
+      "rai",
+      "rcs",
+      "reservation"
+    ],
+    "cpv": [
+      "youtube"
+    ],
+    "email": [
+      "newsletter"
+    ],
+    "social_org": [
+      "facebook",
+      "instagram",
+      "social-name"
+    ],
+    "social_paid": [
+      "facebook",
+      "instagram",
+      "social-name"
+    ],
+    "sms": [
+      "fb-messanger",
+      "sms"
+    ],
+    "app": [
+      "app"
+    ]
+  },
+  "shared_link": "https://utm-builder.streamlit.app/?client_id=chicco_it&sig=b1db5de6e4a673702e9a37a5cfeca712c96d64b0beb71499af99f71aee134d32",
+  "updated_at": "2026-04-13 10:00:05"
+}

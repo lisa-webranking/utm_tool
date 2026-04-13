@@ -5,13 +5,19 @@ import re
 import json
 import hashlib
 import html as html_lib
+from html.parser import HTMLParser
+from email import policy
+from email.parser import BytesParser
 from datetime import datetime
+from io import BytesIO
 from typing import Optional, List, Dict, Any, Tuple
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
+import pandas as pd
 import google.generativeai as genai
 import ga4_mcp_tools  # Importa il modulo con i tool GA4
 from utm_normalize import sanitize_utm_value as _sanitize_utm_value
+from excel_parser import parse_excel_to_client_config
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +231,63 @@ def _normalize_utm_campaign_date_token(utm_campaign: str) -> str:
     return "_".join(parts)
 
 
+def _extract_client_campaign_types(client_rules_text: str) -> List[str]:
+    values: List[str] = []
+    for raw_line in str(client_rules_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = re.search(r"campaign_type usati:\s*(.+)$", line, flags=re.IGNORECASE)
+        if not m:
+            continue
+        for token in m.group(1).split(","):
+            clean = _sanitize_utm_value(token)
+            if clean and clean not in values:
+                values.append(clean)
+    return values
+
+
+def _normalize_utm_campaign_token_separators(utm_campaign: str, client_rules_text: str = "") -> str:
+    """
+    Enforce underscore separators between campaign tokens.
+    Keep hyphens only inside a single token (e.g. promo-primavera).
+    """
+    value = (utm_campaign or "").strip().replace("`", "")
+    if not value:
+        return value
+
+    value = _sanitize_utm_value(value)
+    if not value:
+        return ""
+
+    # Already tokenized with underscore: keep as-is (except date normalization).
+    if "_" in value:
+        return _normalize_utm_campaign_date_token(value)
+
+    # Nothing to normalize if there is no hyphen-based structure.
+    if "-" not in value:
+        return _normalize_utm_campaign_date_token(value)
+
+    parts = [p for p in value.split("-") if p]
+    if len(parts) < 3:
+        # 1-2 segments likely a single token (e.g. promo-primavera)
+        return _normalize_utm_campaign_date_token(value)
+
+    known_types = set(_extract_client_campaign_types(client_rules_text))
+    known_types.update({"promo", "promotional", "transactional", "editorial", "awareness", "awr", "tr", "ed"})
+    second_token = _sanitize_utm_value(parts[1])
+
+    # Conservative rewrite for common malformed outputs:
+    # brandcountry-promotional-promoprimavera -> brandcountry_promotional_promoprimavera
+    if second_token in known_types or len(parts) >= 3:
+        head = [_sanitize_utm_value(parts[0]), second_token]
+        tail = "-".join(parts[2:])
+        normalized = "_".join([p for p in head if p] + ([tail] if tail else []))
+        return _normalize_utm_campaign_date_token(normalized)
+
+    return _normalize_utm_campaign_date_token(value)
+
+
 def _rebuild_url_with_encoded_query(url: str) -> str:
     """
     Forza un encoding corretto della query string (evita spazi e caratteri speciali non encodati).
@@ -260,7 +323,291 @@ def _extract_json_block_if_any(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def clean_bot_response(text: str) -> str:
+class _AnchorExtractor(HTMLParser):
+    """Collect anchor text + href from HTML mail bodies."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entries: List[Dict[str, str]] = []
+        self._in_anchor = False
+        self._anchor_href = ""
+        self._anchor_text_parts: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        if tag.lower() != "a":
+            return
+        self._in_anchor = True
+        self._anchor_text_parts = []
+        href = ""
+        for key, value in attrs:
+            if str(key).lower() == "href":
+                href = str(value or "").strip()
+                break
+        self._anchor_href = href
+
+    def handle_data(self, data: str) -> None:
+        if self._in_anchor and data:
+            self._anchor_text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a" or not self._in_anchor:
+            return
+        text = " ".join(self._anchor_text_parts).strip()
+        text = re.sub(r"\s+", " ", html_lib.unescape(text))
+        href = (self._anchor_href or "").strip()
+        if text or href:
+            self.entries.append({"text": text, "href": href})
+        self._in_anchor = False
+        self._anchor_href = ""
+        self._anchor_text_parts = []
+
+
+def _decode_bytes_fallback(raw: bytes) -> str:
+    for enc in ["utf-8", "utf-8-sig", "latin-1"]:
+        try:
+            return raw.decode(enc)
+        except Exception:
+            continue
+    return raw.decode("utf-8", errors="ignore")
+
+
+def _extract_html_texts_from_eml(raw: bytes) -> List[str]:
+    try:
+        msg = BytesParser(policy=policy.default).parsebytes(raw)
+    except Exception:
+        return []
+
+    html_parts: List[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = str(part.get_content_type() or "").lower()
+            if ctype not in {"text/html", "text/plain"}:
+                continue
+            try:
+                payload = part.get_content()
+            except Exception:
+                payload = _decode_bytes_fallback(part.get_payload(decode=True) or b"")
+            if payload:
+                html_parts.append(str(payload))
+    else:
+        try:
+            payload = msg.get_content()
+        except Exception:
+            payload = _decode_bytes_fallback(msg.get_payload(decode=True) or b"")
+        if payload:
+            html_parts.append(str(payload))
+    return html_parts
+
+
+def _extract_cta_entries_from_html(html_text: str) -> List[Dict[str, str]]:
+    parser = _AnchorExtractor()
+    try:
+        parser.feed(str(html_text or ""))
+    except Exception:
+        return []
+    return parser.entries
+
+
+def _parse_rules_rows_from_uploaded_file(file_name: str, raw_bytes: bytes) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    ext = str(file_name or "").lower().rsplit(".", 1)[-1] if "." in str(file_name or "") else ""
+    if ext == "csv":
+        df = pd.read_csv(BytesIO(raw_bytes), dtype=str).fillna("")
+        for _, row in df.iterrows():
+            row_dict = {str(k): str(v) for k, v in row.to_dict().items()}
+            row_dict["__sheet_name"] = "csv"
+            rows.append(row_dict)
+        return rows
+
+    sheets = pd.read_excel(BytesIO(raw_bytes), sheet_name=None, dtype=str)
+    for sheet_name, df in (sheets or {}).items():
+        if df is None:
+            continue
+        safe_sheet_name = str(sheet_name or "").strip()[:80] or "__sheet__"
+        for _, row in df.fillna("").iterrows():
+            row_dict = {str(k): str(v) for k, v in row.to_dict().items()}
+            row_dict["__sheet_name"] = safe_sheet_name
+            rows.append(row_dict)
+    return rows
+
+
+def _extract_email_variants_from_text(user_input: str) -> List[Dict[str, str]]:
+    text = str(user_input or "").strip()
+    if not text:
+        return []
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    candidates: List[str] = []
+    for ln in lines:
+        lnorm = ln.lower()
+        if re.match(r"^[-*•\d\)\.]+\s*", lnorm):
+            candidates.append(re.sub(r"^[-*•\d\)\.]+\s*", "", ln).strip())
+            continue
+        if (
+            lnorm.startswith("a quelli")
+            or lnorm.startswith("ai ")
+            or lnorm.startswith("a tutti")
+            or "clienti" in lnorm
+        ):
+            candidates.append(ln)
+
+    # fallback: chunk by punctuation for compact messages
+    if not candidates and any(k in text.lower() for k in ["mail", "email", "casistiche", "casistica"]):
+        for piece in re.split(r"[;\n]+", text):
+            p = piece.strip()
+            if "client" in p.lower() and len(p.split()) >= 3:
+                candidates.append(p)
+
+    variants: List[Dict[str, str]] = []
+    seen = set()
+    for cand in candidates:
+        clean_label = re.sub(r"\s+", " ", cand).strip(" .,:;-")
+        if len(clean_label) < 4:
+            continue
+        token = _sanitize_utm_value(clean_label.replace("&", " e "))
+        if not token:
+            continue
+        # keep token concise for UTM naming
+        token_parts = [p for p in token.split("-") if p][:6]
+        token_short = "-".join(token_parts)
+        key = token_short.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        variants.append({"label": clean_label, "token": token_short})
+        if len(variants) >= 8:
+            break
+    return variants
+
+
+def _build_uploaded_files_signature(uploaded_files: List[Any]) -> str:
+    if not uploaded_files:
+        return ""
+    digest = hashlib.sha256()
+    for f in uploaded_files:
+        try:
+            raw = f.getvalue() or b""
+        except Exception:
+            raw = b""
+        digest.update(str(getattr(f, "name", "")).encode("utf-8", errors="ignore"))
+        digest.update(str(len(raw)).encode("ascii", errors="ignore"))
+        digest.update(hashlib.sha256(raw).digest())
+    return digest.hexdigest()
+
+
+def _extract_cta_data_from_uploaded_files(uploaded_files: List[Any]) -> Dict[str, Any]:
+    """
+    Parse uploaded mail-like files and extract CTA labels/tokens as chatbot hints.
+    """
+    signature = _build_uploaded_files_signature(uploaded_files)
+    result: Dict[str, Any] = {
+        "signature": signature,
+        "cta_labels": [],
+        "cta_tokens": [],
+        "cta_links": [],
+        "uploaded_rule_sources": [],
+        "uploaded_rule_mediums": [],
+        "uploaded_rule_campaign_types": [],
+        "uploaded_rule_campaign_examples": [],
+        "file_summaries": [],
+    }
+    if not uploaded_files:
+        return result
+
+    generic_labels = {
+        "clicca qui", "click here", "qui", "here", "link",
+        "vai", "vai al sito", "scopri", "read more",
+    }
+
+    seen_labels = set()
+    seen_tokens = set()
+    seen_links = set()
+    seen_rule_sources = set()
+    seen_rule_mediums = set()
+    seen_rule_campaign_types = set()
+    seen_rule_campaign_examples = set()
+
+    for up in uploaded_files:
+        file_name = str(getattr(up, "name", "file")).strip() or "file"
+        ext = file_name.lower().rsplit(".", 1)[-1] if "." in file_name else ""
+        try:
+            raw = up.getvalue() or b""
+        except Exception:
+            raw = b""
+        body_chunks: List[str] = []
+        if ext in {"html", "htm", "txt"}:
+            body_chunks.append(_decode_bytes_fallback(raw))
+        elif ext == "eml":
+            body_chunks.extend(_extract_html_texts_from_eml(raw))
+        else:
+            body_chunks.append(_decode_bytes_fallback(raw))
+
+        cta_count = 0
+        for chunk in body_chunks:
+            for entry in _extract_cta_entries_from_html(chunk):
+                raw_label = str(entry.get("text", "")).strip()
+                raw_href = str(entry.get("href", "")).strip()
+                if raw_href and raw_href.lower() not in {"#", "javascript:void(0)"} and raw_href not in seen_links:
+                    seen_links.add(raw_href)
+                    if len(result["cta_links"]) < 20:
+                        result["cta_links"].append(raw_href)
+
+                if not raw_label:
+                    continue
+                label_norm = re.sub(r"\s+", " ", html_lib.unescape(raw_label)).strip()
+                if len(label_norm) < 2 or len(label_norm) > 90:
+                    continue
+                if label_norm.lower() in generic_labels:
+                    continue
+                key = label_norm.lower()
+                if key not in seen_labels:
+                    seen_labels.add(key)
+                    if len(result["cta_labels"]) < 20:
+                        result["cta_labels"].append(label_norm)
+                token = _sanitize_utm_value(label_norm.replace("&", " e "))
+                if token and token not in seen_tokens:
+                    seen_tokens.add(token)
+                    if len(result["cta_tokens"]) < 20:
+                        result["cta_tokens"].append(token)
+                cta_count += 1
+
+        if ext in {"xlsx", "xls", "csv"}:
+            try:
+                rules_rows = _parse_rules_rows_from_uploaded_file(file_name, raw)
+                parsed_cfg = parse_excel_to_client_config(rules_rows)
+                for src in parsed_cfg.get("sources", []) or []:
+                    token = _sanitize_utm_value(str(src))
+                    if token and token not in seen_rule_sources:
+                        seen_rule_sources.add(token)
+                        if len(result["uploaded_rule_sources"]) < 30:
+                            result["uploaded_rule_sources"].append(token)
+                for med in parsed_cfg.get("mediums", []) or []:
+                    token = _sanitize_utm_value(str(med))
+                    if token and token not in seen_rule_mediums:
+                        seen_rule_mediums.add(token)
+                        if len(result["uploaded_rule_mediums"]) < 30:
+                            result["uploaded_rule_mediums"].append(token)
+                for ctype in parsed_cfg.get("campaign_types", []) or []:
+                    token = _sanitize_utm_value(str(ctype))
+                    if token and token not in seen_rule_campaign_types:
+                        seen_rule_campaign_types.add(token)
+                        if len(result["uploaded_rule_campaign_types"]) < 20:
+                            result["uploaded_rule_campaign_types"].append(token)
+                for cex in parsed_cfg.get("campaign_examples", []) or []:
+                    token = _sanitize_utm_value(str(cex))
+                    if token and token not in seen_rule_campaign_examples:
+                        seen_rule_campaign_examples.add(token)
+                        if len(result["uploaded_rule_campaign_examples"]) < 20:
+                            result["uploaded_rule_campaign_examples"].append(token)
+            except Exception:
+                logger.exception("Failed to parse uploaded naming convention file: %s", file_name)
+
+        result["file_summaries"].append({"name": file_name, "ctas_found": cta_count})
+
+    return result
+
+
+def clean_bot_response(text: str, client_rules_text: str = "") -> str:
     """
     Pulisce la risposta del bot:
     - rimuove artefatti HTML / backticks
@@ -288,6 +635,12 @@ def clean_bot_response(text: str) -> str:
     # dedupe
     text = _dedupe_repetitions(text).strip()
 
+    # Se il modello ha già generato più URL UTM (casistiche multiple), non collassare a un solo link.
+    all_full_urls = re.findall(r"https?://[^\s<>\"]+", text)
+    utm_urls = [u for u in all_full_urls if "utm_" in u.lower()]
+    if len(utm_urls) >= 2:
+        return text
+
     # Se contiene un JSON con utm_*, estrai link e mostra solo link + istruzione
     parsed_json = _extract_json_block_if_any(text)
     if parsed_json:
@@ -302,7 +655,7 @@ def clean_bot_response(text: str) -> str:
                 continue
             clean_v = str(v).replace("`", "").strip()
             if k == "utm_campaign":
-                clean_v = _normalize_utm_campaign_date_token(clean_v)
+                clean_v = _normalize_utm_campaign_token_separators(clean_v, client_rules_text=client_rules_text)
             utm_pairs.append((k, clean_v))
 
         if base_url:
@@ -324,7 +677,7 @@ def clean_bot_response(text: str) -> str:
         for key, value in pairs:
             clean_value = (value or "").replace("`", "").strip()
             if key == "utm_campaign":
-                clean_value = _normalize_utm_campaign_date_token(clean_value)
+                clean_value = _normalize_utm_campaign_token_separators(clean_value, client_rules_text=client_rules_text)
             cleaned_pairs.append((key, clean_value))
         encoded = urlencode(cleaned_pairs, doseq=True, safe="")
         fixed = urlunparse((p.scheme, p.netloc, p.path, p.params, encoded, p.fragment))
@@ -459,6 +812,15 @@ def _enforce_optional_followup(raw_text: str, context: dict) -> str:
         return text
 
     if optional_step == "content" and not params.get("utm_content"):
+        cta_tokens = context.get("uploaded_cta_tokens") or []
+        if cta_tokens:
+            examples = ", ".join([str(x) for x in cta_tokens[:4] if str(x).strip()])
+            if examples:
+                return (
+                    "Perfetto. Prima del link finale vuoi valorizzare anche utm_content? "
+                    f"Dai file caricati ho rilevato CTA utili, ad esempio: {examples}. "
+                    "Confermi uno di questi o ne preferisci un altro?"
+                )
         return (
             "Perfetto. Prima del link finale vuoi valorizzare anche utm_content? "
             "Per esempio possiamo inserire il nome della CTA, del bottone, del banner o del visual principale."
@@ -471,6 +833,38 @@ def _enforce_optional_followup(raw_text: str, context: dict) -> str:
         )
 
     return text
+
+
+def _enforce_multi_variant_guidance(raw_text: str, context: dict) -> str:
+    """
+    If multiple email variants are detected, ensure the assistant explicitly handles all cases.
+    """
+    text = str(raw_text or "").strip()
+    if not text:
+        return text
+
+    variants = context.get("email_variants") or []
+    if len(variants) < 2:
+        return text
+
+    low = text.lower()
+    already_mentions_multi = any(
+        marker in low
+        for marker in ["casistiche", "casistica", "ciascun", "ciascuna", "ognuna", "ogni segmento", "varianti"]
+    )
+    if already_mentions_multi:
+        return text
+
+    labels = ", ".join([str(v.get("label", "")).strip() for v in variants[:4] if str(v.get("label", "")).strip()])
+    if not labels:
+        return text
+
+    if "?" in text:
+        return f"{text} Considero tutte le casistiche richieste: {labels}."
+    return (
+        f"{text}\n"
+        f"Gestisco la richiesta in modalita multi-casistica e preparo UTM separati per: {labels}."
+    )
 
 
 # -------------------------
@@ -490,11 +884,13 @@ def _update_context_from_response(raw_response: str, user_input: str, context: d
             context["ga4_property_id"] = None
             context["tool_cache"] = {}
             context["optional_step"] = "content"
+            context["email_variants"] = []
             return
 
         plain_input = str(user_input or "").strip()
         input_lower = plain_input.lower()
         params = context["params"]
+        context.setdefault("email_variants", [])
 
         url = _extract_first_url(user_input)
         if url and not params["destination_url"]:
@@ -503,6 +899,24 @@ def _update_context_from_response(raw_response: str, user_input: str, context: d
         has_explicit_utm = any(tag in input_lower for tag in ["utm_", "utm source", "utm medium", "utm campaign"])
         if plain_input and len(plain_input.split()) >= 5 and not has_explicit_utm and not params.get("campaign_brief"):
             params["campaign_brief"] = plain_input
+
+        detected_variants = _extract_email_variants_from_text(plain_input)
+        if detected_variants:
+            existing_tokens = {
+                str(v.get("token", "")).strip().lower()
+                for v in (context.get("email_variants") or [])
+                if isinstance(v, dict)
+            }
+            merged = list(context.get("email_variants") or [])
+            for variant in detected_variants:
+                vtok = str(variant.get("token", "")).strip().lower()
+                if not vtok or vtok in existing_tokens:
+                    continue
+                merged.append({"label": variant.get("label", ""), "token": variant.get("token", "")})
+                existing_tokens.add(vtok)
+                if len(merged) >= 8:
+                    break
+            context["email_variants"] = merged
 
         json_data = _extract_json_block_if_any(raw_response or "")
         if json_data:
@@ -720,6 +1134,8 @@ def _build_system_instruction(
     client_rules_text: str = "",
     preferred_property_id: str = "",
     preferred_property_name: str = "",
+    default_destination_url: str = "",
+    ga4_binding_state: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Builds the system instruction with static rules, skill guidelines,
@@ -743,6 +1159,52 @@ def _build_system_instruction(
     next_desc = step_descriptions.get(next_step, "Genera il link finale completo (step finale)")
 
     ga4_val = context.get("ga4_property_id") or "non ancora selezionata"
+    default_destination_url = str(default_destination_url or "").strip()
+    uploaded_cta_labels = [str(x).strip() for x in (context.get("uploaded_cta_labels") or []) if str(x).strip()]
+    uploaded_cta_tokens = [str(x).strip() for x in (context.get("uploaded_cta_tokens") or []) if str(x).strip()]
+    uploaded_cta_links = [str(x).strip() for x in (context.get("uploaded_cta_links") or []) if str(x).strip()]
+    uploaded_rule_sources = [str(x).strip() for x in (context.get("uploaded_rule_sources") or []) if str(x).strip()]
+    uploaded_rule_mediums = [str(x).strip() for x in (context.get("uploaded_rule_mediums") or []) if str(x).strip()]
+    uploaded_rule_campaign_types = [str(x).strip() for x in (context.get("uploaded_rule_campaign_types") or []) if str(x).strip()]
+    uploaded_rule_campaign_examples = [str(x).strip() for x in (context.get("uploaded_rule_campaign_examples") or []) if str(x).strip()]
+    email_variants = context.get("email_variants") or []
+    uploaded_cta_block = ""
+    if uploaded_cta_labels or uploaded_cta_tokens:
+        labels_csv = ", ".join(uploaded_cta_labels[:8]) if uploaded_cta_labels else "nessuna CTA testuale rilevata"
+        tokens_csv = ", ".join(uploaded_cta_tokens[:8]) if uploaded_cta_tokens else "nessun token CTA rilevato"
+        links_csv = ", ".join(uploaded_cta_links[:5]) if uploaded_cta_links else "nessun link CTA rilevato"
+        uploaded_cta_block = f"""
+CONTESTO CTA DA FILE CARICATI (EMAIL/HTML/TXT/EML)
+- CTA rilevate nel materiale caricato dall'utente: {labels_csv}
+- Token utm-friendly derivati dalle CTA: {tokens_csv}
+- Link CTA rilevati: {links_csv}
+- Quando chiedi utm_content o token CTA di utm_campaign, usa questi esempi come priorita.
+- Se i file mostrano CTA coerenti con la campagna, proponi direttamente quei token e chiedi solo conferma.
+"""
+    uploaded_rules_block = ""
+    if uploaded_rule_sources or uploaded_rule_mediums or uploaded_rule_campaign_types or uploaded_rule_campaign_examples:
+        uploaded_rules_block = f"""
+REGOLE DA FILE ALLEGATI IN CHAT (NOMING CONVENTION CLIENTE)
+- utm_source rilevati dal file allegato: {", ".join(uploaded_rule_sources[:12]) if uploaded_rule_sources else "non rilevati"}
+- utm_medium rilevati dal file allegato: {", ".join(uploaded_rule_mediums[:12]) if uploaded_rule_mediums else "non rilevati"}
+- campaign_type rilevati dal file allegato: {", ".join(uploaded_rule_campaign_types[:10]) if uploaded_rule_campaign_types else "non rilevati"}
+- esempi utm_campaign dal file allegato: {", ".join(uploaded_rule_campaign_examples[:8]) if uploaded_rule_campaign_examples else "non rilevati"}
+- Se presenti, usa queste convenzioni come vincolo primario insieme alle regole cliente gia configurate.
+"""
+    variants_block = ""
+    if email_variants:
+        variants_csv = ", ".join(
+            [str(v.get("label", "")).strip() for v in email_variants[:8] if str(v.get("label", "")).strip()]
+        )
+        variants_tokens_csv = ", ".join(
+            [str(v.get("token", "")).strip() for v in email_variants[:8] if str(v.get("token", "")).strip()]
+        )
+        variants_block = f"""
+CASELISTE/AUDIENCE RILEVATE NELLA RICHIESTA
+- Casistiche richieste: {variants_csv}
+- Token audience suggeriti per distinguere i link: {variants_tokens_csv}
+- Per richieste multi-casistica devi preparare un set UTM separato per ogni casistica.
+"""
     client_rules_block = ""
     if client_rules_text:
         client_rules_block = f"""
@@ -752,6 +1214,9 @@ REGOLE CLIENTE (PRIORITARIE)
 {client_rules_text}
 """
     property_preselection_block = ""
+    binding = ga4_binding_state if isinstance(ga4_binding_state, dict) else {}
+    lock_mode = bool(binding.get("lock_mode"))
+    lock_accessible = bool(binding.get("is_accessible"))
     preferred_pid = str(preferred_property_id or "").replace("properties/", "").strip()
     preferred_label = str(preferred_property_name or "").strip()
     if preferred_pid:
@@ -765,22 +1230,45 @@ PROPERTY CLIENTE PRESELEZIONATA (DEFAULT OPERATIVA)
 - Se GA4 non è accessibile (permessi mancanti/errore), continua con le regole cliente da file UTM senza fermare il flusso.
 """
 
+    ga4_lock_enforcement_block = ""
+    if lock_mode and preferred_pid:
+        access_msg = "disponibile" if lock_accessible else "non disponibile"
+        property_preselection_block = f"""
+PROPERTY CLIENTE VINCOLATA (LOCK ATTIVO)
+- Property cliente vincolata da configurazione: {preferred_label or f"properties/{preferred_pid}"} (properties/{preferred_pid}).
+- NON chiedere all'utente di scegliere/cambiare property.
+- NON accettare property alternative anche se richieste.
+- Se GA4 non e accessibile (permessi mancanti/errore), continua con le regole cliente da file UTM senza fermare il flusso.
+"""
+        ga4_lock_enforcement_block = f"""
+PROPERTY GA4: LOCK CLIENTE ATTIVO
+- Property vincolata a properties/{preferred_pid} (accesso {access_msg}).
+- NON usare tool_guess_property_from_url per cambiare property.
+- NON proporre property alternative.
+- Se accesso GA4 non disponibile, continua il flusso con sole regole UTM cliente.
+"""
+
     base = f"""Sei WR Assistant, un esperto nella generazione di parametri UTM.
 Oggi è il {current_date}.
 
 OBIETTIVO
-Guidare l'utente a creare un URL tracciato che:
+ Guidare l'utente a creare un URL tracciato che:
 - rispetti PRIMA DI TUTTO la naming convention del file UTM cliente configurato
 - usi GA4 solo come controllo di coerenza/adozione, mai come fonte primaria di naming
 - finisca nel canale corretto secondo il channel grouping PRIMARIO della property
-{client_rules_block}
-{property_preselection_block}
+ {client_rules_block}
+ {property_preselection_block}
+ {uploaded_cta_block}
+ {uploaded_rules_block}
+ {variants_block}
 
 REGOLE VISIVE
 1) Solo testo semplice (no HTML, no markdown complesso, no blocchi di codice).
 2) UNA sola domanda per messaggio.
 3) OUTPUT FINALE: stampa SOLO il link completo con un'istruzione del tipo "Copia e incolla questo link completo:".
    NON stampare JSON, NON usare parentesi graffe.
+   ECCEZIONE: se la richiesta contiene più casistiche/audience, stampa "Copia e incolla questi link completi:"
+   e poi un link completo separato per ciascuna casistica, etichettato con la relativa audience.
 4) Rispondi esclusivamente in italiano corretto.
 5) Non usare parole o caratteri di altre lingue/scritture.
 
@@ -825,6 +1313,7 @@ Naming convention:
 - Coerenza: definire una struttura e seguirla
 - Descrittivo ma conciso
 - Trattini dentro i token per separare parole, underscore tra token
+- Non usare trattini per separare i token principali di utm_campaign: tra token usa sempre underscore.
 - Non inventare naming se esiste una convenzione storica.
 
 MAPPING utm_medium / utm_source (USARE SOLO COME FALLBACK SE LE REGOLE CLIENTE NON COPRONO IL CASO)
@@ -896,6 +1385,7 @@ PROPERTY GA4: AUTO-SELEZIONE SENZA CONFERMA
 - Quando hai un URL di destinazione, usa tool_guess_property_from_url(URL) e seleziona automaticamente la migliore candidata (score più alto).
 - NON chiedere conferma della property all'utente.
 - Se non trovi candidate affidabili, continua con regole statiche senza bloccare il flusso.
+{ga4_lock_enforcement_block}
 
 FLOW (UNA DOMANDA PER STEP, ADATTIVO)
 STEP 1: URL destinazione (normalizza a https://www.)
@@ -920,9 +1410,12 @@ STEP 6: utm_campaign
 - Solo se il file cliente non definisce i token, usa questo fallback:
   1) country-lingua, 2) campaignType, 3) campaignName, 4) data, 5) CTA (opzionale)
 - Se i token sono già deducibili dalla descrizione, proponi direttamente una bozza e chiedi solo conferma.
+- Se sono disponibili CTA estratte dai file caricati, usale come riferimento primario per la parte CTA.
+- Se sono presenti più casistiche audience, genera un utm_campaign distinto per ciascuna (o token variante in utm_content, secondo regole cliente).
 STEP 7: utm_content
 - Anche se opzionale, chiedilo sempre prima del link finale.
 - Fai una domanda concreta sul contenuto creativo, per esempio CTA, bottone, banner, hero, visual o placement.
+- Se sono disponibili CTA estratte dai file caricati, proponi almeno 2 esempi reali tra quelli estratti.
 - Se l'utente non vuole valorizzarlo, accetta una risposta come "lascialo vuoto" e passa oltre.
 STEP 8: utm_term
 - Anche se opzionale, chiedilo sempre dopo utm_content e prima del link finale.
@@ -943,6 +1436,9 @@ STATO ATTUALE DELLA CONVERSAZIONE
   - utm_content: {_val("utm_content")}
   - utm_term: {_val("utm_term")}
 - Property GA4: {ga4_val}
+- CTA da file caricati (testo): {", ".join(uploaded_cta_labels[:6]) if uploaded_cta_labels else "non disponibili"}
+- CTA da file caricati (token): {", ".join(uploaded_cta_tokens[:6]) if uploaded_cta_tokens else "non disponibili"}
+- Casistiche audience rilevate: {", ".join([str(v.get("label", "")).strip() for v in email_variants[:6] if str(v.get("label", "")).strip()]) if email_variants else "non rilevate"}
 
 ISTRUZIONI BASATE SULLO STATO
 - Non chiedere nuovamente i parametri già raccolti sopra.
@@ -1064,6 +1560,8 @@ def render_chatbot_interface(
     client_rules_text: str = "",
     preferred_property_id: str = "",
     preferred_property_name: str = "",
+    default_destination_url: str = "",
+    ga4_binding_state: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Renderizza il widget Chatbot in modalità Floating (FAB + Window).
@@ -1079,6 +1577,18 @@ def render_chatbot_interface(
         st.session_state.pending_user_text = None
     if "chat_welcome_sent" not in st.session_state:
         st.session_state.chat_welcome_sent = False
+    if "chat_uploaded_cta_data" not in st.session_state:
+        st.session_state.chat_uploaded_cta_data = {
+            "signature": "",
+            "cta_labels": [],
+            "cta_tokens": [],
+            "cta_links": [],
+            "uploaded_rule_sources": [],
+            "uploaded_rule_mediums": [],
+            "uploaded_rule_campaign_types": [],
+            "uploaded_rule_campaign_examples": [],
+            "file_summaries": [],
+        }
     if "utm_context" not in st.session_state:
         st.session_state.utm_context = {
             "current_step": 0,
@@ -1101,12 +1611,28 @@ def render_chatbot_interface(
             },
             "ga4_property_id": None,
             "tool_cache": {},
+            "uploaded_cta_labels": [],
+            "uploaded_cta_tokens": [],
+            "uploaded_cta_links": [],
+            "uploaded_rule_sources": [],
+            "uploaded_rule_mediums": [],
+            "uploaded_rule_campaign_types": [],
+            "uploaded_rule_campaign_examples": [],
+            "email_variants": [],
         }
     # Backward compatibility: allinea eventuali sessioni vecchie ai nuovi campi.
     st.session_state.utm_context.setdefault("current_step", 0)
     st.session_state.utm_context.setdefault("optional_step", "content")
     st.session_state.utm_context.setdefault("ga4_property_id", None)
     st.session_state.utm_context.setdefault("tool_cache", {})
+    st.session_state.utm_context.setdefault("uploaded_cta_labels", [])
+    st.session_state.utm_context.setdefault("uploaded_cta_tokens", [])
+    st.session_state.utm_context.setdefault("uploaded_cta_links", [])
+    st.session_state.utm_context.setdefault("uploaded_rule_sources", [])
+    st.session_state.utm_context.setdefault("uploaded_rule_mediums", [])
+    st.session_state.utm_context.setdefault("uploaded_rule_campaign_types", [])
+    st.session_state.utm_context.setdefault("uploaded_rule_campaign_examples", [])
+    st.session_state.utm_context.setdefault("email_variants", [])
     st.session_state.utm_context.setdefault("params", {})
     for _k in [
         "destination_url", "campaign_brief", "traffic_type", "ga4_channel",
@@ -1114,8 +1640,14 @@ def render_chatbot_interface(
         "campaign_country_language", "campaign_type", "campaign_name", "campaign_date", "campaign_cta",
     ]:
         st.session_state.utm_context["params"].setdefault(_k, None)
+    binding = ga4_binding_state if isinstance(ga4_binding_state, dict) else {}
+    lock_mode = bool(binding.get("lock_mode"))
+    lock_accessible = bool(binding.get("is_accessible"))
     current_profile_signature = hashlib.sha256(
-        f"{client_rules_text}|{preferred_property_id}|{preferred_property_name}".encode("utf-8")
+        (
+            f"{client_rules_text}|{preferred_property_id}|{preferred_property_name}|{default_destination_url}"
+            f"|lock:{lock_mode}|ga4_access:{lock_accessible}|reason:{binding.get('reason', '')}"
+        ).encode("utf-8")
     ).hexdigest()
     prev_profile_signature = str(st.session_state.get("chat_profile_signature", "")).strip()
     if prev_profile_signature and prev_profile_signature != current_profile_signature:
@@ -1144,6 +1676,14 @@ def render_chatbot_interface(
             },
             "ga4_property_id": None,
             "tool_cache": {},
+            "uploaded_cta_labels": [],
+            "uploaded_cta_tokens": [],
+            "uploaded_cta_links": [],
+            "uploaded_rule_sources": [],
+            "uploaded_rule_mediums": [],
+            "uploaded_rule_campaign_types": [],
+            "uploaded_rule_campaign_examples": [],
+            "email_variants": [],
         }
         st.session_state.chat_sync_notice = "Chat riallineata automaticamente all'ultima configurazione UTM del cliente."
     st.session_state.chat_profile_signature = current_profile_signature
@@ -1202,10 +1742,16 @@ def render_chatbot_interface(
             st.session_state.chat_welcome_sent = True
         with st.container():
             st.markdown('<div class="chat-window-scope" style="display:none;"></div>', unsafe_allow_html=True)
-            st.markdown(
-                '<div class="chat-header"><span class="chat-header-logo">W</span><span class="chat-header-text"><span class="chat-header-title">Smart UTM Assistant</span><span class="chat-header-sub">Percorso guidato per creare URL UTM coerenti e puliti</span></span></div>',
-                unsafe_allow_html=True,
-            )
+            header_col, close_col = st.columns([0.9, 0.1], gap="small")
+            with header_col:
+                st.markdown(
+                    '<div class="chat-header"><span class="chat-header-logo">W</span><span class="chat-header-text"><span class="chat-header-title">Smart UTM Assistant</span><span class="chat-header-sub">Percorso guidato per creare URL UTM coerenti e puliti</span></span></div>',
+                    unsafe_allow_html=True,
+                )
+            with close_col:
+                if st.button("✕", key="chat_close_btn", help="Chiudi chatbot", use_container_width=True):
+                    st.session_state.chat_visible = False
+                    st.rerun()
 
             # MESSAGES - render come HTML puro per evitare spazio nel layout Streamlit
             has_user_messages = any(m.get("role") == "user" for m in st.session_state.messages)
@@ -1355,6 +1901,37 @@ def render_chatbot_interface(
             st.markdown('<div class="chat-input-group-marker"></div>', unsafe_allow_html=True)
             st.markdown('<div class="chat-input-spacer"></div>', unsafe_allow_html=True)
             st.markdown('<div class="chat-input-marker"></div>', unsafe_allow_html=True)
+            uploaded_reference_files = st.file_uploader(
+                "Carica file email di riferimento (opzionale)",
+                type=["html", "htm", "eml", "txt", "xlsx", "xls", "csv"],
+                accept_multiple_files=True,
+                key="chat_reference_files",
+                disabled=chat_locked,
+                help="Il chatbot puo leggere CTA/link da email (HTML/TXT/EML) e naming convention da file Excel/CSV per suggerire UTM coerenti.",
+            )
+
+            current_upload_sig = _build_uploaded_files_signature(uploaded_reference_files or [])
+            cached_upload_data = st.session_state.get("chat_uploaded_cta_data", {})
+            if current_upload_sig and cached_upload_data.get("signature") == current_upload_sig:
+                upload_cta_data = cached_upload_data
+            else:
+                upload_cta_data = _extract_cta_data_from_uploaded_files(uploaded_reference_files or [])
+                st.session_state.chat_uploaded_cta_data = upload_cta_data
+
+            st.session_state.utm_context["uploaded_cta_labels"] = list(upload_cta_data.get("cta_labels", []))
+            st.session_state.utm_context["uploaded_cta_tokens"] = list(upload_cta_data.get("cta_tokens", []))
+            st.session_state.utm_context["uploaded_cta_links"] = list(upload_cta_data.get("cta_links", []))
+            st.session_state.utm_context["uploaded_rule_sources"] = list(upload_cta_data.get("uploaded_rule_sources", []))
+            st.session_state.utm_context["uploaded_rule_mediums"] = list(upload_cta_data.get("uploaded_rule_mediums", []))
+            st.session_state.utm_context["uploaded_rule_campaign_types"] = list(upload_cta_data.get("uploaded_rule_campaign_types", []))
+            st.session_state.utm_context["uploaded_rule_campaign_examples"] = list(upload_cta_data.get("uploaded_rule_campaign_examples", []))
+
+            cta_tokens_preview = [str(x) for x in upload_cta_data.get("cta_tokens", []) if str(x).strip()]
+            if cta_tokens_preview:
+                st.caption(f"CTA rilevate dai file caricati: {', '.join(cta_tokens_preview[:6])}")
+            uploaded_mediums_preview = [str(x) for x in upload_cta_data.get("uploaded_rule_mediums", []) if str(x).strip()]
+            if uploaded_mediums_preview:
+                st.caption(f"Naming (utm_medium) rilevato dai file: {', '.join(uploaded_mediums_preview[:6])}")
             with st.form("chat_input_form", clear_on_submit=True):
                 input_col, send_col = st.columns([0.8, 0.2], gap="small")
                 with input_col:
@@ -1367,8 +1944,13 @@ def render_chatbot_interface(
                 with send_col:
                     submitted = st.form_submit_button("Invia", use_container_width=True, disabled=chat_locked)
 
-            if submitted and user_text and not chat_locked:
-                _queue_user_message(user_text)
+            if submitted and not chat_locked:
+                if user_text:
+                    _queue_user_message(user_text)
+                elif cta_tokens_preview:
+                    _queue_user_message(
+                        "Ho caricato file email di riferimento: usa le CTA estratte per guidarmi su utm_content e token CTA."
+                    )
             if st.session_state.chat_is_responding and st.session_state.pending_user_text:
                 pending_text = st.session_state.pending_user_text
 
@@ -1382,6 +1964,23 @@ def render_chatbot_interface(
                         else:
                             genai.configure(api_key=api_key)
                             utm_ctx = st.session_state.utm_context
+                            if lock_mode and preferred_pid_ctx:
+                                utm_ctx["ga4_property_id"] = preferred_pid_ctx
+
+                            def _bound_property_id(property_id: str) -> str:
+                                pid = str(property_id or "").replace("properties/", "").strip()
+                                if lock_mode and preferred_pid_ctx:
+                                    return preferred_pid_ctx
+                                return pid
+
+                            def _ga4_blocked_response() -> Dict[str, Any]:
+                                return {
+                                    "error": (
+                                        "Accesso GA4 non disponibile per la property configurata "
+                                        f"(properties/{preferred_pid_ctx}). Proseguo con regole UTM cliente."
+                                    ),
+                                    "error_type": "PropertyAccessUnavailable",
+                                }
                             # Aggiorna subito il contesto col testo utente corrente
                             # (cosi' destination_url e altri campi sono disponibili
                             # prima dell'auto-selezione property GA4).
@@ -1397,21 +1996,30 @@ def render_chatbot_interface(
                                 return result
 
                             def tool_get_metadata(property_id: str) -> Any:
-                                return ga4_mcp_tools.get_property_details(property_id, creds)
+                                if lock_mode and preferred_pid_ctx and not lock_accessible:
+                                    return _ga4_blocked_response()
+                                return ga4_mcp_tools.get_property_details(_bound_property_id(property_id), creds)
 
                             def tool_run_report(property_id: str, dimensions: List[str], metrics: List[str], start_date: str = "30daysAgo", end_date: str = "today") -> Any:
-                                cache_key = f"run_report:{property_id}:{dimensions}:{metrics}:{start_date}:{end_date}"
+                                bound_pid = _bound_property_id(property_id)
+                                if lock_mode and preferred_pid_ctx and not lock_accessible:
+                                    return _ga4_blocked_response()
+                                cache_key = f"run_report:{bound_pid}:{dimensions}:{metrics}:{start_date}:{end_date}"
                                 if cache_key in utm_ctx["tool_cache"]:
                                     return utm_ctx["tool_cache"][cache_key]
-                                result = ga4_mcp_tools.run_report(property_id, dimensions, metrics, [{"start_date": start_date, "end_date": end_date}], creds)
+                                result = ga4_mcp_tools.run_report(bound_pid, dimensions, metrics, [{"start_date": start_date, "end_date": end_date}], creds)
                                 utm_ctx["tool_cache"][cache_key] = result
                                 return result
 
                             def tool_run_realtime_report(property_id: str, dimensions: List[str], metrics: List[str]) -> Any:
-                                return ga4_mcp_tools.run_realtime_report(property_id, dimensions, metrics, creds)
+                                if lock_mode and preferred_pid_ctx and not lock_accessible:
+                                    return _ga4_blocked_response()
+                                return ga4_mcp_tools.run_realtime_report(_bound_property_id(property_id), dimensions, metrics, creds)
 
                             def tool_list_ads_links(property_id: str) -> Any:
-                                return ga4_mcp_tools.list_google_ads_links(property_id, creds)
+                                if lock_mode and preferred_pid_ctx and not lock_accessible:
+                                    return _ga4_blocked_response()
+                                return ga4_mcp_tools.list_google_ads_links(_bound_property_id(property_id), creds)
 
                             def tool_guess_property_from_url(destination_url: str) -> Dict[str, Any]:
                                 cache_key = f"guess_property:{destination_url}"
@@ -1479,22 +2087,23 @@ def render_chatbot_interface(
                             ]
 
                             # Auto-select GA4 property from destination URL without asking user confirmation
-                            try:
-                                dest_url = utm_ctx["params"].get("destination_url")
-                                if dest_url and not utm_ctx.get("ga4_property_id"):
-                                    guessed = tool_guess_property_from_url(dest_url)
-                                    candidates = guessed.get("candidates", []) if isinstance(guessed, dict) else []
-                                    if candidates:
-                                        best = sorted(
-                                            candidates,
-                                            key=lambda x: (x.get("score", 0), bool(x.get("property_id"))),
-                                            reverse=True
-                                        )[0]
-                                        best_pid = best.get("property_id")
-                                        if best_pid:
-                                            utm_ctx["ga4_property_id"] = best_pid
-                            except Exception:
-                                pass
+                            if not lock_mode:
+                                try:
+                                    dest_url = utm_ctx["params"].get("destination_url")
+                                    if dest_url and not utm_ctx.get("ga4_property_id"):
+                                        guessed = tool_guess_property_from_url(dest_url)
+                                        candidates = guessed.get("candidates", []) if isinstance(guessed, dict) else []
+                                        if candidates:
+                                            best = sorted(
+                                                candidates,
+                                                key=lambda x: (x.get("score", 0), bool(x.get("property_id"))),
+                                                reverse=True
+                                            )[0]
+                                            best_pid = best.get("property_id")
+                                            if best_pid:
+                                                utm_ctx["ga4_property_id"] = best_pid
+                                except Exception:
+                                    pass
 
                             # --- Dynamic system instruction ---
                             current_date = datetime.now().strftime("%Y-%m-%d")
@@ -1504,6 +2113,8 @@ def render_chatbot_interface(
                                 client_rules_text=client_rules_text,
                                 preferred_property_id=preferred_property_id,
                                 preferred_property_name=preferred_property_name,
+                                default_destination_url=default_destination_url,
+                                ga4_binding_state=binding,
                             )
 
                             # --- History ---
@@ -1529,10 +2140,11 @@ def render_chatbot_interface(
                                     system_instruction,
                                     api_key,
                                 )
-                                cleaned = clean_bot_response(response_text)
+                                cleaned = clean_bot_response(response_text, client_rules_text=client_rules_text)
                                 cleaned = _enforce_guided_single_question(cleaned, utm_ctx)
                                 cleaned = _enforce_client_rule_options(cleaned, utm_ctx, client_rules_text)
                                 cleaned = _enforce_optional_followup(cleaned, utm_ctx)
+                                cleaned = _enforce_multi_variant_guidance(cleaned, utm_ctx)
 
                             st.session_state.messages.append(
                                 {
@@ -1553,7 +2165,7 @@ def render_chatbot_interface(
                                     if final_url and "utm_" in final_url:
                                         # Retry auto-selezione property se ancora mancante
                                         # usando prima URL di destinazione, poi URL finale.
-                                        if not utm_ctx.get("ga4_property_id"):
+                                        if not lock_mode and not utm_ctx.get("ga4_property_id"):
                                             try:
                                                 guess_url = utm_ctx["params"].get("destination_url") or final_url
                                                 guessed = tool_guess_property_from_url(guess_url)
@@ -1571,7 +2183,7 @@ def render_chatbot_interface(
                                                 pass
                                         saved = history_save_func(
                                             final_url,
-                                            utm_ctx.get("ga4_property_id") or ""
+                                            (preferred_pid_ctx if (lock_mode and preferred_pid_ctx) else (utm_ctx.get("ga4_property_id") or ""))
                                         )
                                         if saved:
                                             if hasattr(st, "toast"):

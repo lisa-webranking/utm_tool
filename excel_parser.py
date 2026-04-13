@@ -15,7 +15,9 @@ def _split_rule_values(value: str) -> list:
     raw = str(value or "").strip()
     if not raw:
         return []
-    return [x.strip() for x in re.split(r"[,\|;/]+", raw) if str(x).strip()]
+    blocked = {"none", "nan", "null", "n/a", "-"}
+    tokens = [x.strip() for x in re.split(r"[,\|;/]+", raw) if str(x).strip()]
+    return [x for x in tokens if x.lower() not in blocked]
 
 
 def extract_client_rule_values(client_config: dict):

@@ -15,16 +15,18 @@
         
         div[data-testid="stColumn"]:has(div.fab-unique-marker) button {
             pointer-events: auto;
-            width: 54px !important;
-            height: 54px !important;
-            border-radius: 50% !important;
-            border: 1px solid rgba(112, 212, 147, 0.88) !important;
-            box-shadow: 0 14px 30px rgba(112, 212, 147, 0.28) !important;
+            width: 74px !important;
+            height: 74px !important;
+            border-radius: 16px !important;
+            border: 1px solid rgba(126, 220, 163, 0.92) !important;
+            box-shadow: 0 16px 30px rgba(112, 212, 147, 0.28) !important;
             transition: transform 0.2s, box-shadow 0.2s !important;
             background: linear-gradient(135deg, #8be7a5, #72d493) !important;
             display: block !important;
             margin: 0 !important;
             color: transparent !important;
+            position: relative !important;
+            overflow: visible !important;
         }
         
         div[data-testid="stColumn"]:has(div.fab-unique-marker) button:hover {
@@ -35,17 +37,34 @@
         div[data-testid="stColumn"]:has(div.fab-unique-marker) button p {
             display: none !important;
         }
+        div[data-testid="stColumn"]:has(div.fab-unique-marker) button::before {
+            content: "";
+            position: absolute;
+            left: 20px;
+            top: 24px;
+            width: 33px;
+            height: 25px;
+            background: #f5fff8;
+            -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M12 4C7 4 3 7.1 3 11c0 2.1 1.2 4 3.2 5.3L5.5 20l4.4-2.2c.7.1 1.4.2 2.1.2 5 0 9-3.1 9-7s-4-7-9-7z'/></svg>") center / contain no-repeat;
+            mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M12 4C7 4 3 7.1 3 11c0 2.1 1.2 4 3.2 5.3L5.5 20l4.4-2.2c.7.1 1.4.2 2.1.2 5 0 9-3.1 9-7s-4-7-9-7z'/></svg>") center / contain no-repeat;
+        }
         div[data-testid="stColumn"]:has(div.fab-unique-marker) button::after {
-            content: "WR";
-            font-size: 13px;
+            content: "✦";
+            font-size: 11px;
             font-family: "Manrope", "Segoe UI", sans-serif;
-            font-weight: 800;
-            letter-spacing: 0.08em;
+            font-weight: 900;
             display: flex;
             align-items: center;
             justify-content: center;
-            height: 100%;
-            color: #152118;
+            width: 22px;
+            height: 22px;
+            border-radius: 999px;
+            position: absolute;
+            right: -8px;
+            top: -8px;
+            color: #2f4158;
+            background: #f6fbff;
+            box-shadow: 0 6px 12px rgba(26, 36, 50, 0.24);
         }
         
         /* Nasconde il marker stesso */

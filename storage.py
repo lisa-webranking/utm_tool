@@ -1,4 +1,4 @@
-"""
+﻿"""
 Unified storage layer for UTM Governance Tool.
 
 Abstracts all file I/O behind Protocol interfaces so the backend
@@ -104,16 +104,20 @@ class ClientConfigError(ValueError):
 
 @dataclass
 class ClientConfig:
-    """Relational client config — no JSON blobs.
+    """Relational client config - no JSON blobs.
 
     Arrays (sources, mediums, etc.) are stored as TEXT[] in PostgreSQL
     or as JSON lists in the file-based fallback.
-    The medium→source mapping is a separate table / nested dict.
+    The medium->source mapping is a separate table / nested dict.
     """
 
     client_id: str = ""
     version: int = 1
     # GA4 link
+    ga4_scope: str = "none"
+    ga4_account_name: str = ""
+    ga4_allowed_properties: list[dict[str, str]] = field(default_factory=list)
+    ga4_default_property_id: str = ""
     ga4_property_id: str = ""
     ga4_property_name: str = ""
     ga4_client_name: str = ""
@@ -127,7 +131,7 @@ class ClientConfig:
     # Campaign naming rules
     campaign_notes: list[str] = field(default_factory=list)
     campaign_examples: list[str] = field(default_factory=list)
-    # Medium → source mapping (dict of medium → list of sources)
+    # Medium -> source mapping (dict of medium -> list of sources)
     medium_source_map: dict[str, list[str]] = field(default_factory=dict)
     # Shared link
     shared_link: str = ""
@@ -144,7 +148,7 @@ class ClientConfig:
     def from_dict(cls, data: dict) -> "ClientConfig":
         """Parse and validate a raw dict. Raises ClientConfigError on fatal issues."""
         if not isinstance(data, dict):
-            raise ClientConfigError("Il config non è un dizionario valido")
+            raise ClientConfigError("Il config non e un dizionario valido")
 
         cid = str(data.get("client_id", "")).strip()
         if not cid:
@@ -156,10 +160,66 @@ class ClientConfig:
         except (TypeError, ValueError):
             raise ClientConfigError(f"'version' deve essere un intero, ricevuto: {version!r}")
 
-        def _str_list(val) -> list[str]:
+        def _str_list(val: Any) -> list[str]:
             if isinstance(val, list):
                 return [str(v) for v in val if str(v).strip()]
             return []
+
+        def _norm_pid(raw: Any) -> str:
+            return str(raw or "").replace("properties/", "").strip()
+
+        def _norm_scope(raw: Any) -> str:
+            v = str(raw or "").strip().lower()
+            if v in {"single_property", "multi_property", "account_only", "none"}:
+                return v
+            return ""
+
+        ga4_property_id = _norm_pid(data.get("ga4_property_id", ""))
+        ga4_property_name = str(data.get("ga4_property_name", "")).strip()
+        ga4_account_name = str(data.get("ga4_account_name", "") or data.get("ga4_client_name", "")).strip()
+
+        allowed_raw = data.get("ga4_allowed_properties", [])
+        ga4_allowed_properties: list[dict[str, str]] = []
+        seen_allowed = set()
+        if isinstance(allowed_raw, list):
+            for item in allowed_raw:
+                if not isinstance(item, dict):
+                    continue
+                pid = _norm_pid(item.get("property_id", ""))
+                pname = str(item.get("property_name", "")).strip()
+                if not pid or pid in seen_allowed:
+                    continue
+                ga4_allowed_properties.append({"property_id": pid, "property_name": pname})
+                seen_allowed.add(pid)
+
+        if not ga4_allowed_properties and ga4_property_id:
+            ga4_allowed_properties = [{"property_id": ga4_property_id, "property_name": ga4_property_name}]
+
+        ga4_scope = _norm_scope(data.get("ga4_scope", ""))
+        if not ga4_scope:
+            if len(ga4_allowed_properties) > 1:
+                ga4_scope = "multi_property"
+            elif ga4_allowed_properties or ga4_property_id:
+                ga4_scope = "single_property"
+            elif ga4_account_name:
+                ga4_scope = "account_only"
+            else:
+                ga4_scope = "none"
+
+        ga4_default_property_id = _norm_pid(data.get("ga4_default_property_id", "")) or ga4_property_id
+        if not ga4_default_property_id and ga4_allowed_properties:
+            ga4_default_property_id = ga4_allowed_properties[0]["property_id"]
+
+        if ga4_scope == "single_property" and ga4_allowed_properties:
+            if ga4_default_property_id:
+                default_match = next(
+                    (x for x in ga4_allowed_properties if x.get("property_id") == ga4_default_property_id),
+                    None,
+                )
+                if default_match:
+                    ga4_allowed_properties = [default_match]
+            else:
+                ga4_allowed_properties = [ga4_allowed_properties[0]]
 
         msm_raw = data.get("medium_source_map", {})
         msm = {}
@@ -170,9 +230,13 @@ class ClientConfig:
         return cls(
             client_id=cid,
             version=version,
-            ga4_property_id=str(data.get("ga4_property_id", "")),
-            ga4_property_name=str(data.get("ga4_property_name", "")),
-            ga4_client_name=str(data.get("ga4_client_name", "")),
+            ga4_scope=ga4_scope,
+            ga4_account_name=ga4_account_name,
+            ga4_allowed_properties=ga4_allowed_properties,
+            ga4_default_property_id=ga4_default_property_id,
+            ga4_property_id=ga4_property_id,
+            ga4_property_name=ga4_property_name,
+            ga4_client_name=ga4_account_name,
             default_country=str(data.get("default_country", "")),
             expected_domain=str(data.get("expected_domain", "")),
             sources=_str_list(data.get("sources")),
@@ -195,9 +259,13 @@ class ClientConfig:
         d = {
             "client_id": self.client_id,
             "version": self.version,
+            "ga4_scope": self.ga4_scope,
+            "ga4_account_name": self.ga4_account_name,
+            "ga4_allowed_properties": self.ga4_allowed_properties,
+            "ga4_default_property_id": self.ga4_default_property_id,
             "ga4_property_id": self.ga4_property_id,
             "ga4_property_name": self.ga4_property_name,
-            "ga4_client_name": self.ga4_client_name,
+            "ga4_client_name": self.ga4_account_name or self.ga4_client_name,
             "default_country": self.default_country,
             "expected_domain": self.expected_domain,
             "sources": self.sources,
@@ -219,13 +287,36 @@ class ClientConfig:
     def validate(self) -> list[str]:
         """Return list of warning strings (non-fatal issues)."""
         warnings = []
+        allowed_ids = {
+            str(x.get("property_id", "")).strip()
+            for x in (self.ga4_allowed_properties or [])
+            if isinstance(x, dict)
+        }
+        allowed_ids.discard("")
+        scope = str(self.ga4_scope or "").strip().lower()
+        if scope not in {"single_property", "multi_property", "account_only", "none"}:
+            raise ClientConfigError(
+                f"ga4_scope non valido: {self.ga4_scope!r}. Valori ammessi: single_property, multi_property, account_only, none"
+            )
+        if scope == "single_property":
+            if not allowed_ids:
+                raise ClientConfigError("single_property richiede almeno una property configurata")
+            if self.ga4_default_property_id and self.ga4_default_property_id not in allowed_ids:
+                raise ClientConfigError("ga4_default_property_id non appartiene alle ga4_allowed_properties")
+        if scope == "multi_property":
+            if not allowed_ids:
+                raise ClientConfigError("multi_property richiede almeno una property configurata")
+            if not self.ga4_default_property_id:
+                raise ClientConfigError("multi_property richiede ga4_default_property_id")
+            if self.ga4_default_property_id not in allowed_ids:
+                raise ClientConfigError("ga4_default_property_id non appartiene alle ga4_allowed_properties")
+        if scope in {"account_only", "none"} and allowed_ids:
+            warnings.append(f"Scope {scope} ignora la lista ga4_allowed_properties salvata")
         if not self.sources and not self.mediums:
-            warnings.append("Nessun source o medium definito — il builder mostrerà solo input manuale")
+            warnings.append("Nessun source o medium definito - il builder mostrera solo input manuale")
         if self.version < 1:
             warnings.append(f"version={self.version} sembra invalido (atteso >= 1)")
         return warnings
-
-
 def validate_client_config(data: dict) -> tuple[ClientConfig, list[str]]:
     """Validate a raw dict. Returns (parsed config, warnings). Raises ClientConfigError on fatal issues."""
     cfg = ClientConfig.from_dict(data)
@@ -319,7 +410,7 @@ class FileClientConfigStore:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
                 return None
-            # Validate schema — log warnings but don't block loading
+            # Validate schema â€” log warnings but don't block loading
             try:
                 _cfg, warnings = validate_client_config(payload)
                 for w in warnings:
@@ -338,7 +429,7 @@ class FileClientConfigStore:
             raise ValueError("client_id non valido")
         body = dict(payload or {})
         body["client_id"] = cid
-        # Validate before writing — raises ClientConfigError on fatal issues
+        # Validate before writing â€” raises ClientConfigError on fatal issues
         validate_client_config(body)
         self._dir.mkdir(parents=True, exist_ok=True)
         path = self._path_for(cid)
@@ -591,7 +682,7 @@ class FirestoreCredentialStore:
 
 
 # ---------------------------------------------------------------------------
-# Factory — single point to get all stores
+# Factory â€” single point to get all stores
 # ---------------------------------------------------------------------------
 
 def create_file_stores(base_dir: Path) -> tuple[
@@ -630,3 +721,4 @@ def create_stores(base_dir: Path):
         return create_firestore_stores()
     logger.info("Using file-based storage backend")
     return create_file_stores(base_dir)
+

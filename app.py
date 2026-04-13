@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from log_config import setup_logging
 setup_logging()
 
@@ -49,6 +49,12 @@ from client_rules import (
     get_last_full_week_range, is_monday, build_client_rules_text,
 )
 import ga4_service
+from ga4_binding import (
+    build_ga4_binding_state,
+    normalize_property_id,
+    normalize_ga4_scope,
+    normalize_allowed_properties,
+)
 
 
 # --- CONFIGURAZIONE ---
@@ -68,7 +74,7 @@ def _get_config_value(name: str) -> str:
 CLIENT_LINK_SECRET = _get_config_value("CLIENT_LINK_SECRET")
 _BASE_DIR = Path(__file__).parent
 
-# Legacy constants — kept for any remaining direct references
+# Legacy constants â€” kept for any remaining direct references
 CLIENT_CONFIG_DIR = _BASE_DIR / "client_configs"
 TOKEN_FILE_PATH = _BASE_DIR / "token.json"
 UTM_HISTORY_FILE_PATH = _BASE_DIR / "utm_history.json"
@@ -169,28 +175,48 @@ def save_client_config(client_id: str, payload: dict) -> Path:
     return _client_config_path(client_id)
 
 
-def parse_rules_rows_from_uploaded_file(file_name: str, file_bytes: bytes) -> list:
+def parse_rules_rows_from_uploaded_file(file_name: str, file_bytes: bytes) -> tuple[list, list]:
     ext = Path(file_name or "").suffix.lower()
     rows = []
+    sheet_names = []
+
+    def _clean_cell(value) -> str:
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except Exception:
+            pass
+        text = str(value).strip()
+        if text.lower() in {"none", "nan", "nat", "<na>"}:
+            return ""
+        return text
 
     if ext == ".csv":
-        df = pd.read_csv(BytesIO(file_bytes), dtype=str).fillna("")
+        sheet_names = ["csv"]
+        df = pd.read_csv(BytesIO(file_bytes), dtype=object, keep_default_na=False)
         for _, row in df.iterrows():
-            row_dict = {str(k): str(v) for k, v in row.to_dict().items()}
+            row_dict = {str(k): _clean_cell(v) for k, v in row.to_dict().items()}
+            if not any(row_dict.values()):
+                continue
             row_dict["__sheet_name"] = "csv"
             rows.append(row_dict)
-        return rows
+        return rows, sheet_names
 
-    sheets = pd.read_excel(BytesIO(file_bytes), sheet_name=None, dtype=str)
+    sheets = pd.read_excel(BytesIO(file_bytes), sheet_name=None, dtype=object, keep_default_na=False)
+    sheet_names = [str(name or "").strip()[:80] or "__sheet__" for name in (sheets or {}).keys()]
     for sheet_name, df in (sheets or {}).items():
         if df is None:
             continue
         safe_sheet_name = str(sheet_name or "").strip()[:80] or "__sheet__"
-        for _, row in df.fillna("").iterrows():
-            row_dict = {str(k): str(v) for k, v in row.to_dict().items()}
+        for _, row in df.iterrows():
+            row_dict = {str(k): _clean_cell(v) for k, v in row.to_dict().items()}
+            if not any(row_dict.values()):
+                continue
             row_dict["__sheet_name"] = safe_sheet_name
             rows.append(row_dict)
-    return rows
+    return rows, sheet_names
 
 
 def list_saved_client_ids() -> list:
@@ -254,6 +280,58 @@ def _split_rule_values(value: str) -> list:
     if not raw:
         return []
     return [x.strip() for x in re.split(r"[,\|;/]+", raw) if str(x).strip()]
+
+
+def _resolve_client_ga4_profile(cfg: dict) -> dict:
+    cfg = cfg if isinstance(cfg, dict) else {}
+    scope = normalize_ga4_scope(cfg.get("ga4_scope", ""))
+    legacy_pid = normalize_property_id(cfg.get("ga4_property_id", ""))
+    legacy_pname = str(cfg.get("ga4_property_name", "")).strip()
+    account_name = str(cfg.get("ga4_account_name", "") or cfg.get("ga4_client_name", "")).strip()
+    allowed = normalize_allowed_properties(cfg.get("ga4_allowed_properties", []))
+    if not allowed and legacy_pid:
+        allowed = [{"property_id": legacy_pid, "property_name": legacy_pname}]
+    default_pid = normalize_property_id(cfg.get("ga4_default_property_id", "")) or legacy_pid
+    if not default_pid and allowed:
+        default_pid = allowed[0].get("property_id", "")
+    default_name = ""
+    if default_pid:
+        default_name = next(
+            (str(x.get("property_name", "")).strip() for x in allowed if x.get("property_id") == default_pid),
+            "",
+        ) or legacy_pname
+    if not scope:
+        if len(allowed) > 1:
+            scope = "multi_property"
+        elif allowed or legacy_pid:
+            scope = "single_property"
+        elif account_name:
+            scope = "account_only"
+        else:
+            scope = "none"
+    return {
+        "ga4_scope": scope,
+        "ga4_account_name": account_name,
+        "ga4_allowed_properties": allowed,
+        "ga4_default_property_id": default_pid,
+        "ga4_default_property_name": default_name,
+    }
+
+
+def _build_allowed_property_options(allowed_properties: list) -> list:
+    opts = []
+    seen = set()
+    for item in allowed_properties or []:
+        if not isinstance(item, dict):
+            continue
+        pid = normalize_property_id(item.get("property_id", ""))
+        pname = str(item.get("property_name", "")).strip()
+        if not pid or pid in seen:
+            continue
+        label = _format_property_label(pname, pid)
+        opts.append({"label": label, "property_id": pid, "property_name": pname})
+        seen.add(pid)
+    return opts
 
 
 
@@ -395,6 +473,16 @@ def build_property_name_lookup(accounts_structure):
                 lookup[pid_num] = name
     return lookup
 
+
+def _format_property_label(property_name: str, property_id: str) -> str:
+    pid = normalize_property_id(property_id)
+    pname = str(property_name or "").strip()
+    if pname and pid:
+        return f"{pname} (properties/{pid})"
+    if pid:
+        return f"properties/{pid}"
+    return pname or "-"
+
 def check_tracking_status_for_entry(entry: dict, creds, grace_days: int = 2):
     property_id = entry.get("property_id")
     if not property_id:
@@ -454,7 +542,7 @@ def check_tracking_status_for_entry(entry: dict, creds, grace_days: int = 2):
         if total_sessions > 0 and observed_channel != expected:
             return {
                 "status": "WARNING",
-                "message": f"Il traffico è finito in {observed_channel} invece di {expected}",
+                "message": f"Il traffico Ã¨ finito in {observed_channel} invece di {expected}",
                 "sessions": total_sessions,
                 "observed": observed_channel,
             }
@@ -539,7 +627,7 @@ def fetch_ga4_weekly_campaign_audit(property_id: str, creds, client_config: dict
 
 
 # --- SERVER-SIDE OAUTH CACHE ---
-# Necessario perché Streamlit distrugge st.session_state quando l'utente cambia tab o naviga via,
+# Necessario perchÃ© Streamlit distrugge st.session_state quando l'utente cambia tab o naviga via,
 # perdendo il PKCE code_verifier autogenerato da google-auth.
 @st.cache_resource
 def get_oauth_cache():
@@ -789,7 +877,7 @@ def show_dashboard():
                     _logout_current_user()
                     st.rerun()
         else:
-            if st.button("Account â–¾", key="user_menu_btn", use_container_width=True):
+            if st.button("Account Ã¢â€“Â¾", key="user_menu_btn", use_container_width=True):
                 st.session_state.show_user_menu = not st.session_state.show_user_menu
             if st.session_state.show_user_menu:
                 if st.button("Logout", key="logout_btn_fallback", use_container_width=True):
@@ -802,41 +890,132 @@ def show_dashboard():
         <div class="intro-shell">
             <div class="intro-grid">
                 <div class="intro-copy">
-                    <div class="intro-kicker">Workspace UTM</div>
-                    <div class="intro-status">&#9679; Sincronizzato con GA4 in tempo reale</div>
-                    <div class="intro-title">Builder <span class="intro-title-accent">manuale</span> in primo piano, assistente <span class="intro-title-mark">AI</span> solo quando serve.</div>
-                    <div class="intro-desc">
-                        Crea, valida e governa link UTM con source e medium reali, naming coerente e un flusso piu leggibile per il team.
-                    </div>
-                    <div class="intro-points">
-                        <div class="intro-point">
-                            <div class="intro-point-title">Dati reali</div>
-                            <div class="intro-point-copy">Source e medium letti dalla property attiva.</div>
+                    <div class="hero">
+                        <div class="hero-status">&#9679; Connesso a GA4 in tempo reale</div>
+                        <div class="hero-title">Smart UTM <span class="hero-title-accent">Assistant</span></div>
+                        <div class="hero-desc">Dalla richiesta campagna al link finale in pochi passaggi: Smart UTM Assistant combina dati GA4 reali e regole del tuo UTM Builder cliente, per URL subito coerenti e pronti alla consegna.</div>
+                        <div id="hero-open-chat-cta" class="assistant-cta-link" role="button" tabindex="0" aria-label="Apri chatbot WR Assistant">
+                            <div class="assistant-cta">
+                                <div class="assistant-cta-inner">
+                                    <div class="assistant-cta-icon">&#128172;<span class="assistant-cta-sparkle">&#10022;</span></div>
+                                    <div class="assistant-cta-body">
+                                        <div class="assistant-cta-title">Crea UTM con l&apos;Assistente AI</div>
+                                        <div class="assistant-cta-copy">Guida assistita con doppio check GA4 e naming convention gia adottata dal cliente</div>
+                                    </div>
+                                    <div class="assistant-cta-arrow">&#8594;</div>
+                                </div>
+                            </div>
                         </div>
-                        <div class="intro-point">
-                            <div class="intro-point-title">Builder first</div>
-                            <div class="intro-point-copy">I campi manuali restano il canvas principale di lavoro.</div>
+                        <div class="feature-grid">
+                            <div class="feature-card">
+                                <div class="feature-icon">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <ellipse cx="12" cy="5" rx="7" ry="3"></ellipse>
+                                        <path d="M5 5v14c0 1.7 3.1 3 7 3s7-1.3 7-3V5"></path>
+                                        <path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"></path>
+                                    </svg>
+                                </div>
+                                <div class="feature-title">Source/medium reali GA4</div>
+                            </div>
+                            <div class="feature-card">
+                                <div class="feature-icon">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <rect x="4" y="8" width="16" height="11" rx="2"></rect>
+                                        <path d="M9 4h6"></path>
+                                        <path d="M12 4v4"></path>
+                                        <circle cx="9" cy="13" r="1"></circle>
+                                        <circle cx="15" cy="13" r="1"></circle>
+                                    </svg>
+                                </div>
+                                <div class="feature-title">Guida AI passo-passo</div>
+                            </div>
+                            <div class="feature-card">
+                                <div class="feature-icon">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M16 3h5v5"></path>
+                                        <path d="M4 20l8-8"></path>
+                                        <path d="M21 3l-9 9"></path>
+                                        <path d="M4 4h5v5"></path>
+                                        <path d="M16 16l5 5"></path>
+                                    </svg>
+                                </div>
+                                <div class="feature-title">Naming coerente cliente</div>
+                            </div>
+                            <div class="feature-card">
+                                <div class="feature-icon">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M12 3l7 3v6c0 5-3.5 8.8-7 10-3.5-1.2-7-5-7-10V6l7-3z"></path>
+                                        <path d="M9 12l2 2 4-4"></path>
+                                    </svg>
+                                </div>
+                                <div class="feature-title">Validazione pre-consegna</div>
+                            </div>
                         </div>
-                        <div class="intro-point">
-                            <div class="intro-point-title">Controlli rapidi</div>
-                            <div class="intro-point-copy">Validazione, storico e audit restano nello stesso workspace.</div>
-                        </div>
+                        <div class="hero-sub">Oppure compila manualmente i campi qui sotto &#8595;</div>
                     </div>
                 </div>
                 <div class="assistant-context-card">
                     <div class="assistant-context-label">Assistente AI</div>
-                    <div class="assistant-context-title">Supporto <span class="assistant-context-mark">guidato</span>, non distrazione.</div>
+                    <div class="assistant-context-title">Supporto <span class="assistant-context-mark">guidato</span>, risultati affidabili.</div>
                     <div class="assistant-context-copy">
-                        Quando ti serve un percorso guidato o un doppio controllo, apri il pulsante WR in basso a destra.
+                        Apri WR per ottenere UTM coerenti con le regole del tuo UTM Builder cliente.
+                    </div>
+                    <div class="hero-preview assistant-preview">
+                        <div class="hero-preview-chat">
+                            <div class="preview-msg preview-msg-user">Obiettivo campagna: promo primavera Meta, target Italia.</div>
+                            <div class="preview-msg preview-msg-bot">Perfetto. Ti guido io: verifico source/medium su GA4, applico la naming convention cliente e preparo un link UTM pronto all&apos;uso.</div>
+                        </div>
+                        <div class="hero-preview-result">
+                            <div class="preview-result-row">
+                                <span class="preview-result-key">utm_source</span>
+                                <span class="preview-result-val">meta</span>
+                            </div>
+                            <div class="preview-result-row">
+                                <span class="preview-result-key">utm_medium</span>
+                                <span class="preview-result-val">paid-social</span>
+                            </div>
+                            <div class="preview-result-row">
+                                <span class="preview-result-key">utm_campaign</span>
+                                <span class="preview-result-val">it_promo-spring_20260409_scopri</span>
+                            </div>
+                        </div>
                     </div>
                     <div class="assistant-context-foot">
-                        Utile per naming, suggerimenti veloci e pulizia dei parametri prima della consegna.
+                        Doppio check automatico su GA4 per validare utm_source e utm_medium recenti.
                     </div>
                 </div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
+    )
+    components.html(
+        """
+        <script>
+        (function () {
+          const parentWindow = window.parent || window;
+          const doc = parentWindow.document || document;
+          const cta = doc.getElementById("hero-open-chat-cta");
+          if (!cta || cta.dataset.wrChatBound === "1") return;
+
+          const emitOpenChat = () => {
+            parentWindow.dispatchEvent(new CustomEvent("wr:open-chat"));
+          };
+
+          cta.addEventListener("click", emitOpenChat);
+          cta.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              emitOpenChat();
+            }
+          });
+
+          cta.dataset.wrChatBound = "1";
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
     )
 
     # --- CONTESTO CLIENTE ATTIVO (LINK FIRMATO O SCELTA INTERNA WR) ---
@@ -852,6 +1031,23 @@ def show_dashboard():
     st.session_state["active_client_id"] = active_client_id or ""
     st.session_state["active_client_config"] = active_client_config
     st.session_state["active_client_rules_text"] = build_client_rules_text(active_client_config)
+    if st.session_state.get("credentials") and "ga4_accounts" not in st.session_state:
+        st.session_state.ga4_accounts = get_ga4_accounts_structure(st.session_state.credentials)
+    _ga4_accounts_snapshot = st.session_state.get("ga4_accounts", [])
+    _raw_active_cfg = active_client_config or {}
+    _active_ga4_profile = _resolve_client_ga4_profile(_raw_active_cfg)
+    st.session_state["ga4_binding_state"] = build_ga4_binding_state(
+        lock_mode=bool(st.session_state.get("client_id_lock")),
+        accounts_structure=_ga4_accounts_snapshot if isinstance(_ga4_accounts_snapshot, list) else [],
+        configured_scope=_active_ga4_profile.get("ga4_scope", ""),
+        configured_property_id=str(_active_ga4_profile.get("ga4_default_property_id", "")).strip(),
+        configured_property_name=str(_active_ga4_profile.get("ga4_default_property_name", "")).strip(),
+        configured_account_name=str(_active_ga4_profile.get("ga4_account_name", "")).strip(),
+        configured_allowed_properties=_active_ga4_profile.get("ga4_allowed_properties", []),
+        configured_default_property_id=_active_ga4_profile.get("ga4_default_property_id", ""),
+        selected_property_id=st.session_state.get("builder_selected_property_id", ""),
+        selected_property_name=st.session_state.get("builder_selected_property_name", ""),
+    )
 
     if active_client_id:
         if active_client_config:
@@ -934,9 +1130,21 @@ def show_dashboard():
             st.caption("Questa configurazione aggiorna tutto il workspace in una sola volta.")
 
     # --- TABS DI NAVIGAZIONE ---
-    tab_builder, tab_checker, tab_client_config, tab_history, tab_weekly_audit = st.tabs(
-        ["Build URL", "Check URL", "Client Configuration", "UTM History & Tracking", "Weekly UTM Audit"]
-    )
+    tab_labels = ["Build URL", "Check URL"]
+    if is_webranking_user:
+        tab_labels.append("Client Configuration")
+    tab_labels.extend(["UTM History & Tracking", "Weekly UTM Audit"])
+    tabs = st.tabs(tab_labels)
+    tab_builder = tabs[0]
+    tab_checker = tabs[1]
+    if is_webranking_user:
+        tab_client_config = tabs[2]
+        tab_history = tabs[3]
+        tab_weekly_audit = tabs[4]
+    else:
+        tab_client_config = None
+        tab_history = tabs[2]
+        tab_weekly_audit = tabs[3]
 
     # --- SESSION STATE PER CHAT ---
     if "messages" not in st.session_state:
@@ -947,54 +1155,51 @@ def show_dashboard():
     # ==============================================================================
     with tab_builder:
         if "manual_fields_open" not in st.session_state:
-            st.session_state["manual_fields_open"] = True
+            st.session_state["manual_fields_open"] = False
 
-        st.markdown(
-            """
-            <div class="manual-entry-gate">
-                <div class="manual-entry-gate-badge">Workspace principale</div>
-                <div class="manual-entry-gate-title">Builder UTM manuale</div>
-                <div class="manual-entry-gate-copy">Compila direttamente i campi chiave. Usa l&apos;assistant AI solo quando vuoi supporto guidato o un controllo finale.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.markdown('<div class="manual-toggle-scope"></div>', unsafe_allow_html=True)
-        gate_col1, gate_col2 = st.columns([0.36, 0.64], gap="medium")
-        with gate_col1:
-            if not st.session_state.get("manual_fields_open", False):
-                if st.button(
-                    "Mostra builder manuale",
-                    key="open_manual_fields_btn",
-                    use_container_width=True,
-                ):
-                    st.session_state["manual_fields_open"] = True
-                    st.rerun()
-            else:
-                if st.button(
-                    "Riduci builder manuale",
-                    key="close_manual_fields_btn",
-                    use_container_width=True,
-                ):
-                    st.session_state["manual_fields_open"] = False
-                    st.rerun()
-        with gate_col2:
-            if st.session_state.get("manual_fields_open", False):
-                st.markdown(
-                    '<div class="manual-entry-aside">Builder attivo: compila i campi essenziali, genera l&apos;URL e salva nello storico quando tutto e coerente.</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    '<div class="manual-entry-aside">Builder nascosto: puoi riaprirlo in qualsiasi momento e continuare a usare l&apos;assistant dal pulsante WR.</div>',
-                    unsafe_allow_html=True,
-                )
-
-        if not st.session_state.get("manual_fields_open", False):
+        with st.container(border=True):
+            st.markdown('<div class="manual-entry-unified-marker"></div>', unsafe_allow_html=True)
             st.markdown(
-                '<div class="manual-entry-hint">Il builder manuale e nascosto. Riportalo in vista per compilare i parametri e generare il link.</div>',
+                """
+                <div class="manual-entry-gate-header">
+                    <div class="manual-entry-gate-badge">Workspace principale</div>
+                    <div class="manual-entry-gate-title">Builder UTM manuale</div>
+                    <div class="manual-entry-gate-copy">Compila direttamente i campi chiave. Usa l&apos;assistant AI solo quando vuoi supporto guidato o un controllo finale.</div>
+                </div>
+                """,
                 unsafe_allow_html=True,
             )
+            st.markdown('<div class="manual-toggle-scope"></div>', unsafe_allow_html=True)
+            gate_col1, gate_col2 = st.columns([0.34, 0.66], gap="medium")
+            with gate_col1:
+                if not st.session_state.get("manual_fields_open", False):
+                    if st.button(
+                        "Mostra builder manuale",
+                        key="open_manual_fields_btn",
+                        use_container_width=True,
+                    ):
+                        st.session_state["manual_fields_open"] = True
+                        st.rerun()
+                else:
+                    if st.button(
+                        "Riduci builder manuale",
+                        key="close_manual_fields_btn",
+                        use_container_width=True,
+                    ):
+                        st.session_state["manual_fields_open"] = False
+                        st.rerun()
+            with gate_col2:
+                if st.session_state.get("manual_fields_open", False):
+                    st.markdown(
+                        '<div class="manual-entry-inline-status">Builder attivo: compila i campi essenziali, genera l&apos;URL e salva nello storico quando tutto e coerente.</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        '<div class="manual-entry-inline-status">Builder nascosto: puoi riaprirlo in qualsiasi momento e continuare a usare l&apos;assistant dal pulsante WR.</div>',
+                        unsafe_allow_html=True,
+                    )
+
         if st.session_state.get("manual_fields_open", False):
             src_select_value = str(st.session_state.get("req_src_val_select", "") or "").strip()
             src_manual_value = str(st.session_state.get("req_src_val_manual", "") or "").strip()
@@ -1039,6 +1244,7 @@ def show_dashboard():
             is_locked_client_view = bool(st.session_state.get("client_id_lock"))
 
             active_client_config = st.session_state.get("active_client_config") or {}
+            builder_ga4_profile = _resolve_client_ga4_profile(active_client_config)
             client_rule_sources, client_rule_mediums, _client_rule_campaign_types = extract_client_rule_values(active_client_config)
             client_field_examples = extract_client_field_examples(active_client_config)
             campaign_name_examples = client_field_examples.get("campaign_name", [])
@@ -1086,9 +1292,89 @@ def show_dashboard():
                     with st.spinner("Caricamento Account GA4..."):
                         st.session_state.ga4_accounts = get_ga4_accounts_structure(st.session_state.credentials)
                 accounts_structure = st.session_state.ga4_accounts
-                if accounts_structure:
+                ga4_binding_state = st.session_state.get("ga4_binding_state", {})
+                if is_locked_client_view:
+                    locked_account = (
+                        str(ga4_binding_state.get("configured_account_name", "")).strip()
+                        or str(ga4_binding_state.get("resolved_account_name", "")).strip()
+                    )
+                    lock_scope = str(ga4_binding_state.get("ga4_scope", "")).strip()
+                    allowed_options = _build_allowed_property_options(
+                        ga4_binding_state.get("configured_allowed_properties", [])
+                    )
+
+                    with ga_col1:
+                        st.text_input(
+                            "GA4 Account",
+                            value=locked_account or "Non configurato",
+                            disabled=True,
+                            key=f"builder_locked_account_{st.session_state.get('active_client_id', '') or 'none'}",
+                        )
+
+                    if allowed_options:
+                        allowed_ids = [x["property_id"] for x in allowed_options]
+                        current_builder_pid = normalize_property_id(st.session_state.get("builder_selected_property_id", ""))
+                        default_pid = normalize_property_id(ga4_binding_state.get("configured_default_property_id", ""))
+                        selected_locked_pid = current_builder_pid if current_builder_pid in allowed_ids else (default_pid if default_pid in allowed_ids else allowed_ids[0])
+                        with ga_col2:
+                            picked_locked_pid = st.selectbox(
+                                "GA4 Property (vincolata)",
+                                allowed_ids,
+                                index=allowed_ids.index(selected_locked_pid),
+                                format_func=lambda pid: next((x["label"] for x in allowed_options if x["property_id"] == pid), pid),
+                                key=f"builder_locked_allowed_property_{builder_profile_token or 'none'}",
+                            )
+                        picked_locked_item = next((x for x in allowed_options if x["property_id"] == picked_locked_pid), None)
+                        selected_prop_name = str((picked_locked_item or {}).get("property_name", "")).strip()
+                        sel_prop_id = f"properties/{picked_locked_pid}" if picked_locked_pid else ""
+                        if len(allowed_options) > 1:
+                            st.caption("Lock attivo: puoi usare solo le property abilitate in configurazione cliente.")
+                    else:
+                        with ga_col2:
+                            st.text_input(
+                                "GA4 Property",
+                                value="Selezione manuale runtime",
+                                disabled=True,
+                                key=f"builder_locked_property_runtime_{st.session_state.get('active_client_id', '') or 'none'}",
+                            )
+                        if lock_scope in {"none", "account_only"}:
+                            st.info("Questo cliente usa naming convention senza property vincolata. Se disponibile, seleziona una property runtime qui sotto.")
+                        else:
+                            st.warning("La configurazione cliente non include property GA4 abilitate. Il builder usera naming convention e regole del file.")
+                        if accounts_structure:
+                            account_names = [a["display_name"] for a in accounts_structure]
+                            runtime_account_idx = 0
+                            if locked_account and locked_account in account_names:
+                                runtime_account_idx = account_names.index(locked_account)
+                            runtime_account_key = f"builder_locked_runtime_account_{builder_profile_token or 'none'}"
+                            runtime_property_key = f"builder_locked_runtime_property_{builder_profile_token or 'none'}"
+                            with ga_col1:
+                                runtime_account = st.selectbox("Account GA4 runtime", account_names, index=runtime_account_idx, key=runtime_account_key)
+                            selected_account = next((a for a in accounts_structure if a["display_name"] == runtime_account), None)
+                            if selected_account and selected_account["properties"]:
+                                runtime_prop_map = {
+                                    normalize_property_id(p.get("property_id", "")): str(p.get("display_name", "")).strip()
+                                    for p in selected_account["properties"]
+                                    if normalize_property_id(p.get("property_id", ""))
+                                }
+                                runtime_ids = list(runtime_prop_map.keys())
+                                runtime_selected_pid = normalize_property_id(st.session_state.get("builder_selected_property_id", ""))
+                                runtime_idx = runtime_ids.index(runtime_selected_pid) if runtime_selected_pid in runtime_ids else 0
+                                with ga_col2:
+                                    runtime_pid = st.selectbox(
+                                        "Property GA4 runtime",
+                                        runtime_ids,
+                                        index=runtime_idx,
+                                        format_func=lambda pid: _format_property_label(runtime_prop_map.get(pid, ""), pid),
+                                        key=runtime_property_key,
+                                    )
+                                selected_prop_name = runtime_prop_map.get(runtime_pid, "")
+                                sel_prop_id = f"properties/{runtime_pid}" if runtime_pid else ""
+                            else:
+                                st.warning("Nessuna property disponibile nell'account runtime selezionato.")
+                elif accounts_structure:
                     account_names = [a["display_name"] for a in accounts_structure]
-                    preferred_ga4_client_name = str(active_client_config.get("ga4_client_name", "")).strip()
+                    preferred_ga4_client_name = str(builder_ga4_profile.get("ga4_account_name", "")).strip()
                     selected_account = None
                     selected_account_name = ""
                     default_account_idx = 0
@@ -1115,22 +1401,13 @@ def show_dashboard():
                     account_widget_key = f"builder_ga4_account_{builder_profile_token or 'none'}"
                     property_widget_key = f"builder_ga4_property_{builder_profile_token or 'none'}"
                     with ga_col1:
-                        if selected_account and is_locked_client_view:
-                            selected_account_name = str(selected_account.get("display_name", "")).strip()
-                            st.text_input(
-                                "GA4 Account",
-                                value=selected_account_name,
-                                disabled=True,
-                                key=f"builder_locked_account_{st.session_state.get('active_client_id', '') or 'none'}",
-                            )
-                        else:
-                            selected_account_name = st.selectbox("GA4 Account", account_names, index=default_account_idx, key=account_widget_key)
-                            selected_account = next((a for a in accounts_structure if a["display_name"] == selected_account_name), None)
+                        selected_account_name = st.selectbox("GA4 Account", account_names, index=default_account_idx, key=account_widget_key)
+                        selected_account = next((a for a in accounts_structure if a["display_name"] == selected_account_name), None)
                     if selected_account and selected_account["properties"]:
                         prop_map = {p["display_name"]: p["property_id"] for p in selected_account["properties"]}
                         with ga_col2:
                             prop_names = list(prop_map.keys())
-                            preferred_prop_id = str(active_client_config.get("ga4_property_id", "")).replace("properties/", "").strip()
+                            preferred_prop_id = str(builder_ga4_profile.get("ga4_default_property_id", "")).replace("properties/", "").strip()
                             default_prop_idx = 0
                             if preferred_prop_id:
                                 for idx, prop_name in enumerate(prop_names):
@@ -1178,9 +1455,56 @@ def show_dashboard():
                         st.warning("Nessuna property disponibile nell'account selezionato.")
                 else:
                     st.warning("Nessun account GA4 trovato o accesso negato.")
+
+                if sel_prop_id and not real_sources and not real_mediums and not source_medium_map:
+                    current_prop_key = f"sources_{sel_prop_id}"
+                    if current_prop_key not in st.session_state:
+                        with st.spinner("Lettura sorgenti reali dalla property..."):
+                            st.session_state[current_prop_key] = get_top_traffic_sources(sel_prop_id, st.session_state.credentials)
+                    current_medium_key = f"mediums_{sel_prop_id}"
+                    if current_medium_key not in st.session_state:
+                        with st.spinner("Lettura medium reali dalla property..."):
+                            st.session_state[current_medium_key] = get_top_traffic_mediums(sel_prop_id, st.session_state.credentials)
+                    current_pairs_key = f"source_medium_pairs_{sel_prop_id}"
+                    if current_pairs_key not in st.session_state:
+                        with st.spinner("Lettura relazione source-medium dalla property..."):
+                            st.session_state[current_pairs_key] = get_source_medium_pairs(sel_prop_id, st.session_state.credentials)
+                    real_sources = st.session_state.get(current_prop_key, [])
+                    real_mediums = st.session_state.get(current_medium_key, [])
+                    pairs = st.session_state.get(current_pairs_key, [])
+                    source_medium_map = {}
+                    source_medium_seen = {}
+                    for src_raw, med_raw in pairs:
+                        src_n = normalize_token(src_raw)
+                        med_n = normalize_medium_token(med_raw)
+                        if src_n and med_n:
+                            if src_n not in source_medium_map:
+                                source_medium_map[src_n] = []
+                                source_medium_seen[src_n] = set()
+                            if med_n not in source_medium_seen[src_n]:
+                                source_medium_map[src_n].append(med_n)
+                                source_medium_seen[src_n].add(med_n)
+                    if real_sources:
+                        preview = ", ".join(real_sources[:6])
+                        st.markdown(f'<div class="tilda-note">Sorgenti recenti da GA4: {html_lib.escape(preview)}</div>', unsafe_allow_html=True)
+                    if real_mediums:
+                        medium_preview = ", ".join(real_mediums[:6])
+                        st.markdown(f'<div class="tilda-note">Medium recenti da GA4: {html_lib.escape(medium_preview)}</div>', unsafe_allow_html=True)
     
             st.session_state["builder_selected_property_id"] = str(sel_prop_id or "")
             st.session_state["builder_selected_property_name"] = str(selected_prop_name or "")
+            st.session_state["ga4_binding_state"] = build_ga4_binding_state(
+                lock_mode=bool(st.session_state.get("client_id_lock")),
+                accounts_structure=st.session_state.get("ga4_accounts", []) if isinstance(st.session_state.get("ga4_accounts", []), list) else [],
+                configured_scope=builder_ga4_profile.get("ga4_scope", ""),
+                configured_property_id=str(builder_ga4_profile.get("ga4_default_property_id", "")).strip(),
+                configured_property_name=str(builder_ga4_profile.get("ga4_default_property_name", "")).strip(),
+                configured_account_name=str(builder_ga4_profile.get("ga4_account_name", "")).strip(),
+                configured_allowed_properties=builder_ga4_profile.get("ga4_allowed_properties", []),
+                configured_default_property_id=builder_ga4_profile.get("ga4_default_property_id", ""),
+                selected_property_id=st.session_state.get("builder_selected_property_id", ""),
+                selected_property_name=st.session_state.get("builder_selected_property_name", ""),
+            )
     
             with st.container(border=True):
                 st.markdown('<div class="builder-box-marker"></div>', unsafe_allow_html=True)
@@ -1235,7 +1559,7 @@ def show_dashboard():
                 source_default = ""
                 medium_default = ""
 
-                # Defaults come only from client config or GA4 — no hardcoded values
+                # Defaults come only from client config or GA4 â€” no hardcoded values
                 if active_client_config:
                     if client_rule_sources:
                         source_default = normalize_token(client_rule_sources[0])
@@ -1789,367 +2113,575 @@ def show_dashboard():
     # ==============================================================================
     # TAB 3: CLIENT CONFIGURATION
     # ==============================================================================
-    with tab_client_config:
-        st.markdown("### Client Configuration")
-        st.markdown("Configura app cliente: upload UTM Builder, selezione GA4 e link dedicato.")
-
-        # Registro rapido configurazioni salvate (ultimo update + metadati principali)
-        cfg_rows = []
-        for cfg_id in list_saved_client_ids():
-            cfg_payload = load_client_config(cfg_id) or {}
-            ga4_prop_id = str(cfg_payload.get("ga4_property_id", "")).replace("properties/", "").strip()
-            ga4_prop_name = str(cfg_payload.get("ga4_property_name", "")).strip()
-            if ga4_prop_name and ga4_prop_id:
-                ga4_prop_display = f"{ga4_prop_name} ({ga4_prop_id})"
-            elif ga4_prop_id:
-                ga4_prop_display = ga4_prop_id
-            elif ga4_prop_name:
-                ga4_prop_display = ga4_prop_name
-            else:
-                ga4_prop_display = "Non impostata"
-            cfg_rows.append(
-                {
-                    "client_id": cfg_id,
-                    "version": cfg_payload.get("version", "-"),
-                    "updated_at": cfg_payload.get("updated_at", "-"),
-                    "updated_by": cfg_payload.get("updated_by", "-"),
-                    "ga4_account": cfg_payload.get("ga4_client_name", "-"),
-                    "ga4_property": ga4_prop_display,
-                    "ga4_property_id": ga4_prop_id or "-",
-                    "source_file_name": cfg_payload.get("source_file_name", "-"),
-                    "shared_link": str(cfg_payload.get("shared_link", "") or "-"),
-                }
+    if is_webranking_user and tab_client_config is not None:
+        with tab_client_config:
+            st.markdown("### Client Configuration")
+            st.markdown(
+                """
+                <div class="cfg-hero">
+                    <div class="cfg-hero-kicker">Workspace Admin WR</div>
+                    <div class="cfg-hero-title">Setup completo configurazione cliente</div>
+                    <div class="cfg-hero-copy">Gestisci naming convention, scope GA4, dominio atteso e link firmato cliente in un unico flusso guidato.</div>
+                    <div class="cfg-hero-steps">
+                        <span>1. Carica file UTM Builder</span>
+                        <span>2. Definisci scope GA4</span>
+                        <span>3. Configura dati cliente</span>
+                        <span>4. Salva e genera link</span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-        if st.session_state.get("client_id_lock"):
-            st.warning("Modalita�  cliente bloccata attiva in questa sessione.")
-            if st.button("Sblocca modalità cliente", key="unlock_client_mode_btn"):
-                st.session_state.client_id_lock = ""
-                st.session_state.client_lock_error = ""
-                try:
-                    st.query_params.clear()
-                except Exception:
-                    pass
+
+            # Registro rapido configurazioni salvate (ultimo update + metadati principali)
+            cfg_rows = []
+            for cfg_id in list_saved_client_ids():
+                cfg_payload = load_client_config(cfg_id) or {}
+                ga4_profile = _resolve_client_ga4_profile(cfg_payload)
+                ga4_scope = ga4_profile.get("ga4_scope", "none")
+                allowed_props = ga4_profile.get("ga4_allowed_properties", [])
+                if ga4_scope == "single_property":
+                    ga4_prop_display = _format_property_label(
+                        ga4_profile.get("ga4_default_property_name", ""),
+                        ga4_profile.get("ga4_default_property_id", ""),
+                    )
+                elif ga4_scope == "multi_property":
+                    ga4_prop_display = f"{len(allowed_props)} property"
+                elif ga4_scope == "account_only":
+                    ga4_prop_display = "Selezione manuale runtime"
+                else:
+                    ga4_prop_display = "-"
+                cfg_rows.append(
+                    {
+                        "client_id": cfg_id,
+                        "version": cfg_payload.get("version", "-"),
+                        "updated_at": cfg_payload.get("updated_at", "-"),
+                        "updated_by": cfg_payload.get("updated_by", "-"),
+                        "ga4_scope": ga4_scope,
+                        "ga4_account": ga4_profile.get("ga4_account_name", "-") or "-",
+                        "ga4_property": ga4_prop_display,
+                        "ga4_property_id": ga4_profile.get("ga4_default_property_id", "") or "-",
+                        "source_file_name": cfg_payload.get("source_file_name", "-"),
+                        "shared_link": str(cfg_payload.get("shared_link", "") or "-"),
+                    }
+                )
+            scope_counts = {
+                "single_property": sum(1 for x in cfg_rows if str(x.get("ga4_scope", "")) == "single_property"),
+                "multi_property": sum(1 for x in cfg_rows if str(x.get("ga4_scope", "")) == "multi_property"),
+                "account_only": sum(1 for x in cfg_rows if str(x.get("ga4_scope", "")) == "account_only"),
+                "none": sum(1 for x in cfg_rows if str(x.get("ga4_scope", "")) == "none"),
+            }
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Config totali", len(cfg_rows))
+            m2.metric("Single/Multi property", scope_counts["single_property"] + scope_counts["multi_property"])
+            m3.metric("Solo account", scope_counts["account_only"])
+            m4.metric("Solo naming", scope_counts["none"])
+
+            with st.expander("Guida rapida operativa", expanded=False):
+                st.markdown(
+                    """
+                    - Usa **Modifica configurazione** per aggiornare clienti già attivi.
+                    - Usa **Nuova configurazione aggiuntiva** per creare un nuovo `client_id`.
+                    - Se il cliente non ha accesso GA4, scegli **Solo naming convention**.
+                    - Per più property nello stesso account, scegli **Più property** e imposta una default.
+                    """
+                )
+            if st.session_state.get("client_id_lock"):
+                st.warning("Modalitaï¿½Â  cliente bloccata attiva in questa sessione.")
+                if st.button("Sblocca modalitÃ  cliente", key="unlock_client_mode_btn"):
+                    st.session_state.client_id_lock = ""
+                    st.session_state.client_lock_error = ""
+                    try:
+                        st.query_params.clear()
+                    except Exception:
+                        pass
+                    st.rerun()
+
+            existing_client_ids = list_saved_client_ids()
+            if "cfg_manage_mode" not in st.session_state:
+                st.session_state.cfg_manage_mode = "Modifica configurazione" if existing_client_ids else "Nuova configurazione aggiuntiva"
+            if "cfg_selected_existing_client" not in st.session_state:
+                st.session_state.cfg_selected_existing_client = existing_client_ids[0] if existing_client_ids else ""
+
+            if "cfg_selected_client" not in st.session_state:
+                st.session_state.cfg_selected_client = "Nuova configurazione"
+            if "cfg_form_loaded_client" not in st.session_state:
+                st.session_state.cfg_form_loaded_client = ""
+            if "cfg_client_id_input" not in st.session_state:
+                st.session_state.cfg_client_id_input = ""
+            if "cfg_ga4_client_name" not in st.session_state:
+                st.session_state.cfg_ga4_client_name = ""
+            if "cfg_ga4_property_id" not in st.session_state:
+                st.session_state.cfg_ga4_property_id = ""
+            if "cfg_ga4_property_name" not in st.session_state:
+                st.session_state.cfg_ga4_property_name = ""
+            if "cfg_ga4_scope" not in st.session_state:
+                st.session_state.cfg_ga4_scope = "single_property"
+            if "cfg_ga4_account_name" not in st.session_state:
+                st.session_state.cfg_ga4_account_name = ""
+            if "cfg_ga4_allowed_property_ids" not in st.session_state:
+                st.session_state.cfg_ga4_allowed_property_ids = []
+            if "cfg_ga4_default_property_id" not in st.session_state:
+                st.session_state.cfg_ga4_default_property_id = ""
+            if "cfg_expected_domain" not in st.session_state:
+                st.session_state.cfg_expected_domain = ""
+            if "cfg_default_country" not in st.session_state:
+                st.session_state.cfg_default_country = "it"
+            if "cfg_rules_rows" not in st.session_state:
+                st.session_state.cfg_rules_rows = []
+            if "cfg_rules_sheet_names" not in st.session_state:
+                st.session_state.cfg_rules_sheet_names = []
+            if "cfg_rules_file_name" not in st.session_state:
+                st.session_state.cfg_rules_file_name = ""
+            if "cfg_rules_file_sha256" not in st.session_state:
+                st.session_state.cfg_rules_file_sha256 = ""
+            if "cfg_rules_parser_version" not in st.session_state:
+                st.session_state.cfg_rules_parser_version = ""
+            if "cfg_base_url" not in st.session_state:
+                st.session_state.cfg_base_url = "https://utm-builder.streamlit.app/"
+
+            manage_options = ["Modifica configurazione", "Nuova configurazione aggiuntiva"]
+            st.radio(
+                "Operazione",
+                manage_options,
+                key="cfg_manage_mode",
+                horizontal=True,
+            )
+            st.caption("La modalità selezionata controlla il comportamento del form e le validazioni di salvataggio.")
+
+            selected_cfg = "Nuova configurazione"
+            if st.session_state.cfg_manage_mode == "Modifica configurazione":
+                if existing_client_ids:
+                    if st.session_state.get("cfg_selected_existing_client", "") not in existing_client_ids:
+                        st.session_state.cfg_selected_existing_client = existing_client_ids[0]
+                    selected_cfg = st.selectbox(
+                        "Configurazione da modificare",
+                        existing_client_ids,
+                        key="cfg_selected_existing_client",
+                    )
+                else:
+                    st.info("Nessuna configurazione esistente: passa a 'Nuova configurazione aggiuntiva'.")
+            else:
+                st.caption("Stai creando una nuova configurazione. Inserisci un nuovo Client ID nel form.")
+
+            st.session_state.cfg_selected_client = selected_cfg
+
+            if selected_cfg != "Nuova configurazione" and st.session_state.cfg_form_loaded_client != selected_cfg:
+                cfg = load_client_config(selected_cfg) or {}
+                cfg_ga4_profile = _resolve_client_ga4_profile(cfg)
+                st.session_state.cfg_client_id_input = str(cfg.get("client_id", selected_cfg))
+                st.session_state.cfg_ga4_scope = str(cfg_ga4_profile.get("ga4_scope", "single_property"))
+                st.session_state.cfg_ga4_account_name = str(cfg_ga4_profile.get("ga4_account_name", ""))
+                st.session_state.cfg_ga4_client_name = str(cfg_ga4_profile.get("ga4_account_name", ""))
+                st.session_state.cfg_ga4_allowed_property_ids = [
+                    str(x.get("property_id", "")).strip()
+                    for x in (cfg_ga4_profile.get("ga4_allowed_properties", []) or [])
+                    if isinstance(x, dict) and str(x.get("property_id", "")).strip()
+                ]
+                st.session_state.cfg_ga4_default_property_id = str(cfg_ga4_profile.get("ga4_default_property_id", "")).strip()
+                st.session_state.cfg_ga4_property_id = st.session_state.cfg_ga4_default_property_id
+                st.session_state.cfg_ga4_property_name = str(cfg_ga4_profile.get("ga4_default_property_name", "")).strip()
+                st.session_state.cfg_expected_domain = str(cfg.get("expected_domain", ""))
+                st.session_state.cfg_default_country = str(cfg.get("default_country", "it") or "it")
+                st.session_state.cfg_extracted = {
+                    "sources": cfg.get("sources", []),
+                    "mediums": cfg.get("mediums", []),
+                    "campaign_types": cfg.get("campaign_types", []),
+                    "campaign_notes": cfg.get("campaign_notes", []),
+                    "campaign_examples": cfg.get("campaign_examples", []),
+                    "medium_source_map": cfg.get("medium_source_map", {}),
+                }
+                st.session_state.cfg_rules_rows = []  # no raw rows in new schema
+                st.session_state.cfg_rules_sheet_names = []
+                st.session_state.cfg_rules_file_name = str(cfg.get("source_file_name", ""))
+                st.session_state.cfg_rules_file_sha256 = str(cfg.get("source_file_sha256", ""))
+                st.session_state.cfg_form_loaded_client = selected_cfg
+                st.rerun()
+            if selected_cfg == "Nuova configurazione" and st.session_state.cfg_form_loaded_client:
+                st.session_state.cfg_form_loaded_client = ""
+                st.session_state.cfg_client_id_input = ""
+                st.session_state.cfg_ga4_scope = "single_property"
+                st.session_state.cfg_ga4_account_name = ""
+                st.session_state.cfg_ga4_client_name = ""
+                st.session_state.cfg_ga4_allowed_property_ids = []
+                st.session_state.cfg_ga4_default_property_id = ""
+                st.session_state.cfg_ga4_property_id = ""
+                st.session_state.cfg_ga4_property_name = ""
+                st.session_state.cfg_expected_domain = ""
+                st.session_state.cfg_default_country = "it"
+                st.session_state.cfg_extracted = {}
+                st.session_state.cfg_rules_rows = []
+                st.session_state.cfg_rules_sheet_names = []
+                st.session_state.cfg_rules_file_name = ""
+                st.session_state.cfg_rules_file_sha256 = ""
                 st.rerun()
 
-        existing_client_ids = list_saved_client_ids()
-        if "cfg_manage_mode" not in st.session_state:
-            st.session_state.cfg_manage_mode = "Modifica configurazione" if existing_client_ids else "Nuova configurazione aggiuntiva"
-        if "cfg_selected_existing_client" not in st.session_state:
-            st.session_state.cfg_selected_existing_client = existing_client_ids[0] if existing_client_ids else ""
-
-        if "cfg_selected_client" not in st.session_state:
-            st.session_state.cfg_selected_client = "Nuova configurazione"
-        if "cfg_form_loaded_client" not in st.session_state:
-            st.session_state.cfg_form_loaded_client = ""
-        if "cfg_client_id_input" not in st.session_state:
-            st.session_state.cfg_client_id_input = ""
-        if "cfg_ga4_client_name" not in st.session_state:
-            st.session_state.cfg_ga4_client_name = ""
-        if "cfg_ga4_property_id" not in st.session_state:
-            st.session_state.cfg_ga4_property_id = ""
-        if "cfg_ga4_property_name" not in st.session_state:
-            st.session_state.cfg_ga4_property_name = ""
-        if "cfg_expected_domain" not in st.session_state:
-            st.session_state.cfg_expected_domain = ""
-        if "cfg_default_country" not in st.session_state:
-            st.session_state.cfg_default_country = "it"
-        if "cfg_rules_rows" not in st.session_state:
-            st.session_state.cfg_rules_rows = []
-        if "cfg_rules_file_name" not in st.session_state:
-            st.session_state.cfg_rules_file_name = ""
-        if "cfg_rules_file_sha256" not in st.session_state:
-            st.session_state.cfg_rules_file_sha256 = ""
-        if "cfg_base_url" not in st.session_state:
-            st.session_state.cfg_base_url = "https://utm-builder.streamlit.app/"
-
-        manage_options = ["Modifica configurazione", "Nuova configurazione aggiuntiva"]
-        st.radio(
-            "Operazione",
-            manage_options,
-            key="cfg_manage_mode",
-            horizontal=True,
-        )
-
-        selected_cfg = "Nuova configurazione"
-        if st.session_state.cfg_manage_mode == "Modifica configurazione":
-            if existing_client_ids:
-                if st.session_state.get("cfg_selected_existing_client", "") not in existing_client_ids:
-                    st.session_state.cfg_selected_existing_client = existing_client_ids[0]
-                selected_cfg = st.selectbox(
-                    "Configurazione da modificare",
-                    existing_client_ids,
-                    key="cfg_selected_existing_client",
+            if cfg_rows:
+                st.markdown("#### Catalogo configurazioni clienti")
+                st.dataframe(
+                    pd.DataFrame(cfg_rows).sort_values(by=["updated_at", "client_id"], ascending=[False, True]),
+                    use_container_width=True,
+                    hide_index=True,
                 )
+
+                st.markdown("#### Recupera o rigenera link cliente")
+                recover_client_id = st.selectbox(
+                    "Cliente da recuperare",
+                    list_saved_client_ids(),
+                    key="recover_client_id_select",
+                )
+                recover_cfg = load_client_config(recover_client_id) or {}
+                current_shared_link = str(recover_cfg.get("shared_link", "")).strip()
+                st.text_input(
+                    "Link cliente corrente",
+                    value=current_shared_link,
+                    disabled=True,
+                )
+                if st.button("Rigenera link cliente", key="regen_client_link_btn"):
+                    if not CLIENT_LINK_SECRET:
+                        st.warning("CLIENT_LINK_SECRET non configurato: impossibile rigenerare il link firmato.")
+                    else:
+                        previous_link = str(recover_cfg.get("shared_link", "")).strip()
+                        base_url = str(st.session_state.get("cfg_base_url", "")).strip() or "https://utm-builder.streamlit.app/"
+                        if previous_link:
+                            try:
+                                parsed_prev = urlparse(previous_link)
+                                if parsed_prev.scheme and parsed_prev.netloc:
+                                    base_url = f"{parsed_prev.scheme}://{parsed_prev.netloc}{parsed_prev.path}"
+                            except Exception:
+                                pass
+                        if not base_url.startswith(("http://", "https://")):
+                            base_url = f"https://{base_url}"
+                        base_url = base_url.rstrip("/")
+
+                        new_sig = sign_client_id(recover_client_id)
+                        regenerated_link = f"{base_url}/?client_id={recover_client_id}&sig={new_sig}"
+
+                        recover_cfg["shared_link"] = regenerated_link
+                        recover_cfg["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        recover_cfg["updated_by"] = st.session_state.get("user_email", "")
+                        save_client_config(recover_client_id, recover_cfg)
+                        st.success("Link cliente rigenerato.")
+                        st.code(regenerated_link, language="text")
             else:
-                st.info("Nessuna configurazione esistente: passa a 'Nuova configurazione aggiuntiva'.")
-        else:
-            st.caption("Stai creando una nuova configurazione. Inserisci un nuovo Client ID nel form.")
+                st.info("Nessuna configurazione cliente salvata.")
 
-        st.session_state.cfg_selected_client = selected_cfg
-
-        if selected_cfg != "Nuova configurazione" and st.session_state.cfg_form_loaded_client != selected_cfg:
-            cfg = load_client_config(selected_cfg) or {}
-            st.session_state.cfg_client_id_input = str(cfg.get("client_id", selected_cfg))
-            st.session_state.cfg_ga4_client_name = str(cfg.get("ga4_client_name", ""))
-            st.session_state.cfg_ga4_property_id = str(cfg.get("ga4_property_id", ""))
-            st.session_state.cfg_ga4_property_name = str(cfg.get("ga4_property_name", ""))
-            st.session_state.cfg_expected_domain = str(cfg.get("expected_domain", ""))
-            st.session_state.cfg_default_country = str(cfg.get("default_country", "it") or "it")
-            st.session_state.cfg_extracted = {
-                "sources": cfg.get("sources", []),
-                "mediums": cfg.get("mediums", []),
-                "campaign_types": cfg.get("campaign_types", []),
-                "campaign_notes": cfg.get("campaign_notes", []),
-                "campaign_examples": cfg.get("campaign_examples", []),
-                "medium_source_map": cfg.get("medium_source_map", {}),
-            }
-            st.session_state.cfg_rules_rows = []  # no raw rows in new schema
-            st.session_state.cfg_rules_file_name = str(cfg.get("source_file_name", ""))
-            st.session_state.cfg_rules_file_sha256 = str(cfg.get("source_file_sha256", ""))
-            st.session_state.cfg_form_loaded_client = selected_cfg
-            st.rerun()
-        if selected_cfg == "Nuova configurazione" and st.session_state.cfg_form_loaded_client:
-            st.session_state.cfg_form_loaded_client = ""
-            st.session_state.cfg_client_id_input = ""
-            st.session_state.cfg_ga4_client_name = ""
-            st.session_state.cfg_ga4_property_id = ""
-            st.session_state.cfg_ga4_property_name = ""
-            st.session_state.cfg_expected_domain = ""
-            st.session_state.cfg_default_country = "it"
-            st.session_state.cfg_extracted = {}
-            st.session_state.cfg_rules_rows = []
-            st.session_state.cfg_rules_file_name = ""
-            st.session_state.cfg_rules_file_sha256 = ""
-            st.rerun()
-
-        if cfg_rows:
-            st.markdown("#### Stato configurazioni clienti")
-            st.dataframe(
-                pd.DataFrame(cfg_rows).sort_values(by=["updated_at", "client_id"], ascending=[False, True]),
-                use_container_width=True,
-                hide_index=True,
+            st.markdown("#### 1) Carica file UTM Builder")
+            st.caption("Carica il file di naming convention per estrarre source, medium, campaign type e mapping.")
+            force_reparse = st.button("Rianalizza file caricato", key="cfg_force_reparse_btn")
+            uploaded_rules_file = st.file_uploader(
+                "File UTM Builder (xlsx/csv)",
+                type=["xlsx", "xls", "csv"],
+                key="cfg_rules_uploader",
             )
-
-            st.markdown("#### Recupera o rigenera link cliente")
-            recover_client_id = st.selectbox(
-                "Cliente da recuperare",
-                list_saved_client_ids(),
-                key="recover_client_id_select",
-            )
-            recover_cfg = load_client_config(recover_client_id) or {}
-            current_shared_link = str(recover_cfg.get("shared_link", "")).strip()
-            st.text_input(
-                "Link cliente corrente",
-                value=current_shared_link,
-                disabled=True,
-            )
-            if st.button("Rigenera link cliente", key="regen_client_link_btn"):
-                if not CLIENT_LINK_SECRET:
-                    st.warning("CLIENT_LINK_SECRET non configurato: impossibile rigenerare il link firmato.")
-                else:
-                    previous_link = str(recover_cfg.get("shared_link", "")).strip()
-                    base_url = str(st.session_state.get("cfg_base_url", "")).strip() or "https://utm-builder.streamlit.app/"
-                    if previous_link:
+            if uploaded_rules_file is not None:
+                uploaded_bytes = uploaded_rules_file.getvalue()
+                uploaded_sha = hashlib.sha256(uploaded_bytes).hexdigest()
+                parser_version = "v3"
+                if (
+                    uploaded_sha != st.session_state.get("cfg_rules_file_sha256", "")
+                    or st.session_state.get("cfg_rules_parser_version", "") != parser_version
+                    or force_reparse
+                ):
                         try:
-                            parsed_prev = urlparse(previous_link)
-                            if parsed_prev.scheme and parsed_prev.netloc:
-                                base_url = f"{parsed_prev.scheme}://{parsed_prev.netloc}{parsed_prev.path}"
-                        except Exception:
-                            pass
-                    if not base_url.startswith(("http://", "https://")):
-                        base_url = f"https://{base_url}"
-                    base_url = base_url.rstrip("/")
+                            parsed_rows, parsed_sheet_names = parse_rules_rows_from_uploaded_file(uploaded_rules_file.name, uploaded_bytes)
+                            extracted = parse_excel_to_client_config(parsed_rows)
+                            st.session_state.cfg_extracted = extracted
+                            st.session_state.cfg_rules_rows = parsed_rows  # keep for preview only
+                            st.session_state.cfg_rules_sheet_names = parsed_sheet_names
+                            st.session_state.cfg_rules_file_name = str(uploaded_rules_file.name)
+                            st.session_state.cfg_rules_file_sha256 = uploaded_sha
+                            st.session_state.cfg_rules_parser_version = parser_version
+                            st.success(f"File caricato: {uploaded_rules_file.name} â€” "
+                                       f"{len(extracted.get('sources', []))} source, "
+                                       f"{len(extracted.get('mediums', []))} medium, "
+                                       f"{len(extracted.get('campaign_types', []))} campaign type estratti")
+                        except Exception as e:
+                            st.error(f"Errore lettura file UTM Builder: {e}")
+                elif st.session_state.get("cfg_rules_file_name"):
+                    st.caption(f"File regole corrente: {st.session_state.get('cfg_rules_file_name')}")
 
-                    new_sig = sign_client_id(recover_client_id)
-                    regenerated_link = f"{base_url}/?client_id={recover_client_id}&sig={new_sig}"
+            _ext = st.session_state.get("cfg_extracted", {})
+            if _ext:
+                st.caption(
+                    f"Regole estratte: source={len(_ext.get('sources', []))} | "
+                    f"medium={len(_ext.get('mediums', []))} | "
+                    f"campaign_type={len(_ext.get('campaign_types', []))}"
+                )
 
-                    recover_cfg["shared_link"] = regenerated_link
-                    recover_cfg["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    recover_cfg["updated_by"] = st.session_state.get("user_email", "")
-                    save_client_config(recover_client_id, recover_cfg)
-                    st.success("Link cliente rigenerato.")
-                    st.code(regenerated_link, language="text")
-        else:
-            st.info("Nessuna configurazione cliente salvata.")
+            current_rows = st.session_state.get("cfg_rules_rows", []) or []
+            current_sheet_names = [str(s).strip() for s in (st.session_state.get("cfg_rules_sheet_names", []) or []) if str(s).strip()]
+            if current_rows or current_sheet_names:
+                st.markdown("#### Anteprima file UTM Builder")
+                preview_df = pd.DataFrame(current_rows) if current_rows else pd.DataFrame()
+                sheet_names = current_sheet_names
+                if not sheet_names and "__sheet_name" in preview_df.columns:
+                    sheet_names = [s for s in preview_df["__sheet_name"].fillna("").astype(str).unique().tolist() if s]
 
-        st.markdown("#### 1) Carica file UTM Builder")
-        uploaded_rules_file = st.file_uploader(
-            "File UTM Builder (xlsx/csv)",
-            type=["xlsx", "xls", "csv"],
-            key="cfg_rules_uploader",
-        )
-        if uploaded_rules_file is not None:
-            uploaded_bytes = uploaded_rules_file.getvalue()
-            uploaded_sha = hashlib.sha256(uploaded_bytes).hexdigest()
-            if uploaded_sha != st.session_state.get("cfg_rules_file_sha256", ""):
-                try:
-                    parsed_rows = parse_rules_rows_from_uploaded_file(uploaded_rules_file.name, uploaded_bytes)
-                    extracted = parse_excel_to_client_config(parsed_rows)
-                    st.session_state.cfg_extracted = extracted
-                    st.session_state.cfg_rules_rows = parsed_rows  # keep for preview only
-                    st.session_state.cfg_rules_file_name = str(uploaded_rules_file.name)
-                    st.session_state.cfg_rules_file_sha256 = uploaded_sha
-                    st.success(f"File caricato: {uploaded_rules_file.name} — "
-                               f"{len(extracted.get('sources', []))} source, "
-                               f"{len(extracted.get('mediums', []))} medium, "
-                               f"{len(extracted.get('campaign_types', []))} campaign type estratti")
-                except Exception as e:
-                    st.error(f"Errore lettura file UTM Builder: {e}")
-        elif st.session_state.get("cfg_rules_file_name"):
-            st.caption(f"File regole corrente: {st.session_state.get('cfg_rules_file_name')}")
-
-        _ext = st.session_state.get("cfg_extracted", {})
-        if _ext:
-            st.caption(
-                f"Regole estratte: source={len(_ext.get('sources', []))} | "
-                f"medium={len(_ext.get('mediums', []))} | "
-                f"campaign_type={len(_ext.get('campaign_types', []))}"
-            )
-
-        current_rows = st.session_state.get("cfg_rules_rows", []) or []
-        if current_rows:
-            st.markdown("#### Anteprima file UTM Builder")
-            preview_df = pd.DataFrame(current_rows)
-            if "__sheet_name" in preview_df.columns:
-                sheet_names = [s for s in preview_df["__sheet_name"].fillna("").astype(str).unique().tolist() if s]
                 if sheet_names:
                     preview_tabs = st.tabs([f"Foglio: {s}" for s in sheet_names])
                     for i, sheet_name in enumerate(sheet_names):
                         with preview_tabs[i]:
-                            sheet_df = preview_df[preview_df["__sheet_name"].astype(str) == sheet_name].copy()
+                            if "__sheet_name" in preview_df.columns:
+                                sheet_df = preview_df[preview_df["__sheet_name"].astype(str) == sheet_name].copy()
+                            else:
+                                sheet_df = pd.DataFrame()
                             sheet_df = sheet_df.drop(columns=["__sheet_name"], errors="ignore")
-                            st.dataframe(sheet_df.head(20), use_container_width=True, hide_index=True)
-                            if len(sheet_df) > 20:
-                                st.caption(f"Mostrate 20 righe su {len(sheet_df)} del foglio '{sheet_name}'.")
-                else:
+                            if sheet_df.empty:
+                                st.info("Foglio letto correttamente, ma senza righe dati utili da mostrare in anteprima.")
+                            else:
+                                st.dataframe(sheet_df.head(20), use_container_width=True, hide_index=True)
+                                if len(sheet_df) > 20:
+                                    st.caption(f"Mostrate 20 righe su {len(sheet_df)} del foglio '{sheet_name}'.")
+                elif not preview_df.empty:
                     st.dataframe(preview_df.head(20), use_container_width=True, hide_index=True)
-            else:
-                st.dataframe(preview_df.head(20), use_container_width=True, hide_index=True)
-            if len(preview_df) > 20:
-                st.caption(f"Totale righe importate: {len(preview_df)}.")
-
-        if "ga4_accounts" not in st.session_state:
-            with st.spinner("Caricamento account GA4..."):
-                st.session_state.ga4_accounts = get_ga4_accounts_structure(st.session_state.credentials)
-        accounts_structure = st.session_state.get("ga4_accounts", [])
-        if not isinstance(accounts_structure, list):
-            accounts_structure = []
-
-        selected_cfg_account_name = ""
-        selected_cfg_property_name = ""
-        selected_cfg_property_id = ""
-        st.markdown("#### 2) Seleziona account e property GA4")
-        if accounts_structure:
-            acc_names = [str(a.get("display_name", "")) for a in accounts_structure]
-            pref_acc_name = str(st.session_state.get("cfg_ga4_client_name", "")).strip().lower()
-            acc_idx = 0
-            if pref_acc_name:
-                for idx, name in enumerate(acc_names):
-                    if name.strip().lower() == pref_acc_name:
-                        acc_idx = idx
-                        break
-            selected_cfg_account_name = st.selectbox("Account GA4 cliente", acc_names, index=acc_idx, key="cfg_ga4_account_select")
-            selected_acc = next((a for a in accounts_structure if str(a.get("display_name", "")) == selected_cfg_account_name), None)
-
-            prop_list = (selected_acc or {}).get("properties", []) or []
-            if prop_list:
-                prop_labels = []
-                prop_by_label = {}
-                for p in prop_list:
-                    prop_name = str(p.get("display_name", "")).strip()
-                    prop_id_raw = str(p.get("property_id", "")).replace("properties/", "").strip()
-                    label = f"{prop_name} ({prop_id_raw})" if prop_id_raw else prop_name
-                    prop_labels.append(label)
-                    prop_by_label[label] = p
-                pref_prop_id = str(st.session_state.get("cfg_ga4_property_id", "")).replace("properties/", "").strip()
-                prop_idx = 0
-                if pref_prop_id:
-                    for idx, label in enumerate(prop_labels):
-                        candidate = prop_by_label.get(label, {})
-                        candidate_id = str(candidate.get("property_id", "")).replace("properties/", "").strip()
-                        if candidate_id == pref_prop_id:
-                            prop_idx = idx
-                            break
-                selected_label = st.selectbox("Property GA4 cliente", prop_labels, index=prop_idx, key="cfg_ga4_property_select")
-                selected_prop = prop_by_label.get(selected_label, {})
-                selected_cfg_property_name = str(selected_prop.get("display_name", "")).strip()
-                selected_cfg_property_id = str(selected_prop.get("property_id", "")).replace("properties/", "").strip()
-            else:
-                st.warning("Nessuna property disponibile per l'account selezionato.")
-        else:
-            st.warning("Nessun account GA4 disponibile.")
-
-        if selected_cfg_account_name:
-            st.session_state.cfg_ga4_client_name = selected_cfg_account_name
-        if selected_cfg_property_name:
-            st.session_state.cfg_ga4_property_name = selected_cfg_property_name
-        if selected_cfg_property_id:
-            st.session_state.cfg_ga4_property_id = selected_cfg_property_id
-
-        st.markdown("#### 3) Configurazione app cliente")
-        st.text_input("Client ID", key="cfg_client_id_input", placeholder="es. chicco_2023")
-        st.text_input("Dominio atteso", key="cfg_expected_domain", placeholder="es. chicco.it")
-        st.text_input("Country default", key="cfg_default_country", placeholder="es. it")
-        st.text_input(
-            "Base URL app (per link cliente)",
-            key="cfg_base_url",
-            placeholder="es. https://utm-builder.streamlit.app/ oppure http://localhost:8503",
-        )
-
-        st.markdown("#### 4) Salva e genera link cliente")
-        if st.button("Salva configurazione cliente", key="save_client_config_btn", type="primary"):
-            cid = normalize_client_id(st.session_state.get("cfg_client_id_input", ""))
-            if not cid:
-                st.error("Inserisci un Client ID valido.")
-            elif st.session_state.get("cfg_manage_mode") == "Nuova configurazione aggiuntiva" and cid in existing_client_ids:
-                st.error("Questo Client ID esiste già. Per aggiornare usa 'Modifica configurazione' oppure inserisci un nuovo Client ID.")
-            else:
-                existing_cfg = load_client_config(cid) or {}
-                base_url = str(st.session_state.get("cfg_base_url", "")).strip() or "https://utm-builder.streamlit.app/"
-                if not base_url.startswith(("http://", "https://")):
-                    base_url = f"https://{base_url}"
-                base_url = base_url.rstrip("/")
-
-                shared_link = str(existing_cfg.get("shared_link", "")).strip()
-                if CLIENT_LINK_SECRET:
-                    sig = sign_client_id(cid)
-                    shared_link = f"{base_url}/?client_id={cid}&sig={sig}"
-
-                extracted = st.session_state.get("cfg_extracted", {})
-                payload = dict(existing_cfg)
-                payload.update(
-                    {
-                        "client_id": cid,
-                        "version": int(existing_cfg.get("version", 0) or 0) + 1,
-                        "created_at": str(existing_cfg.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-                        "updated_by": st.session_state.get("user_email", ""),
-                        "source_file_name": str(st.session_state.get("cfg_rules_file_name", "")).strip(),
-                        "source_file_sha256": str(st.session_state.get("cfg_rules_file_sha256", "")).strip(),
-                        "ga4_client_name": str(st.session_state.get("cfg_ga4_client_name", "")).strip(),
-                        "ga4_property_name": str(st.session_state.get("cfg_ga4_property_name", "")).strip(),
-                        "ga4_property_id": str(st.session_state.get("cfg_ga4_property_id", "")).strip(),
-                        "default_country": normalize_token(st.session_state.get("cfg_default_country", "")) or "it",
-                        "expected_domain": str(st.session_state.get("cfg_expected_domain", "")).strip().lower(),
-                        # Structured data from Excel parsing (no JSON blob)
-                        "sources": extracted.get("sources", existing_cfg.get("sources", [])),
-                        "mediums": extracted.get("mediums", existing_cfg.get("mediums", [])),
-                        "campaign_types": extracted.get("campaign_types", existing_cfg.get("campaign_types", [])),
-                        "campaign_notes": extracted.get("campaign_notes", existing_cfg.get("campaign_notes", [])),
-                        "campaign_examples": extracted.get("campaign_examples", existing_cfg.get("campaign_examples", [])),
-                        "medium_source_map": extracted.get("medium_source_map", existing_cfg.get("medium_source_map", {})),
-                        "shared_link": shared_link,
-                        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-                )
-
-                saved_path = save_client_config(cid, payload)
-                st.success(f"Configurazione salvata: {saved_path.name}")
-                if CLIENT_LINK_SECRET:
-                    st.code(shared_link, language="text")
                 else:
-                    st.warning("CLIENT_LINK_SECRET non configurato: link firmato non generato.")
+                    st.info("Nessuna riga disponibile in anteprima per il file caricato.")
 
-    # ==============================================================================
+                if not preview_df.empty and len(preview_df) > 20:
+                    st.caption(f"Totale righe importate: {len(preview_df)}.")
+
+            if "ga4_accounts" not in st.session_state:
+                with st.spinner("Caricamento account GA4..."):
+                    st.session_state.ga4_accounts = get_ga4_accounts_structure(st.session_state.credentials)
+            accounts_structure = st.session_state.get("ga4_accounts", [])
+            if not isinstance(accounts_structure, list):
+                accounts_structure = []
+
+            selected_cfg_account_name = str(st.session_state.get("cfg_ga4_account_name", "")).strip()
+            selected_cfg_property_name = ""
+            selected_cfg_property_id = ""
+            selected_cfg_allowed_property_ids = list(st.session_state.get("cfg_ga4_allowed_property_ids", []) or [])
+            selected_cfg_default_property_id = str(st.session_state.get("cfg_ga4_default_property_id", "")).replace("properties/", "").strip()
+
+            st.markdown("#### 2) Collegamento GA4")
+            st.caption("Definisci il perimetro GA4 applicabile alla configurazione cliente.")
+            scope_labels = {
+                "single_property": "1 property",
+                "multi_property": "Piu property",
+                "account_only": "Solo account",
+                "none": "Solo naming convention",
+            }
+            scope_options = list(scope_labels.keys())
+            current_scope = normalize_ga4_scope(st.session_state.get("cfg_ga4_scope", "")) or "single_property"
+            if current_scope not in scope_options:
+                current_scope = "single_property"
+            selected_scope = st.radio(
+                "Tipo collegamento GA4",
+                scope_options,
+                index=scope_options.index(current_scope),
+                format_func=lambda x: scope_labels.get(x, x),
+                horizontal=True,
+                key="cfg_ga4_scope",
+            )
+
+            selected_acc = None
+            prop_list = []
+            prop_options = []
+            prop_by_id = {}
+            if selected_scope != "none":
+                if accounts_structure:
+                    acc_names = [str(a.get("display_name", "")) for a in accounts_structure]
+                    pref_acc_name = str(st.session_state.get("cfg_ga4_account_name", "")).strip().lower()
+                    acc_idx = 0
+                    if pref_acc_name:
+                        for idx, name in enumerate(acc_names):
+                            if name.strip().lower() == pref_acc_name:
+                                acc_idx = idx
+                                break
+                    selected_cfg_account_name = st.selectbox("Account GA4 cliente", acc_names, index=acc_idx, key="cfg_ga4_account_select")
+                    selected_acc = next((a for a in accounts_structure if str(a.get("display_name", "")) == selected_cfg_account_name), None)
+                    prop_list = (selected_acc or {}).get("properties", []) or []
+                    for p in prop_list:
+                        pid = normalize_property_id(p.get("property_id", ""))
+                        pname = str(p.get("display_name", "")).strip()
+                        if not pid:
+                            continue
+                        prop_by_id[pid] = {"property_id": pid, "property_name": pname}
+                        prop_options.append((pid, _format_property_label(pname, pid)))
+                else:
+                    st.warning("Nessun account GA4 disponibile.")
+            else:
+                st.info("Configurazione senza GA4: verranno usate solo naming convention e regole del file.")
+
+            if selected_scope in {"single_property", "multi_property"}:
+                if not prop_options:
+                    st.warning("Nessuna property disponibile per l'account selezionato.")
+                    selected_cfg_allowed_property_ids = []
+                    selected_cfg_default_property_id = ""
+                elif selected_scope == "single_property":
+                    prop_ids = [x[0] for x in prop_options]
+                    default_idx = prop_ids.index(selected_cfg_default_property_id) if selected_cfg_default_property_id in prop_ids else 0
+                    picked_pid = st.selectbox(
+                        "Property GA4 cliente",
+                        prop_ids,
+                        index=default_idx,
+                        format_func=lambda pid: next((lbl for x_pid, lbl in prop_options if x_pid == pid), pid),
+                        key="cfg_ga4_single_property_select",
+                    )
+                    selected_cfg_allowed_property_ids = [picked_pid]
+                    selected_cfg_default_property_id = picked_pid
+                else:
+                    default_multi = [pid for pid in selected_cfg_allowed_property_ids if pid in [x[0] for x in prop_options]]
+                    picked_multi = st.multiselect(
+                        "Property GA4 abilitate",
+                        [x[0] for x in prop_options],
+                        default=default_multi,
+                        format_func=lambda pid: next((lbl for x_pid, lbl in prop_options if x_pid == pid), pid),
+                        key="cfg_ga4_multi_property_select",
+                    )
+                    selected_cfg_allowed_property_ids = picked_multi
+                    if picked_multi:
+                        default_pid = selected_cfg_default_property_id if selected_cfg_default_property_id in picked_multi else picked_multi[0]
+                        selected_cfg_default_property_id = st.selectbox(
+                            "Property GA4 di default",
+                            picked_multi,
+                            index=picked_multi.index(default_pid),
+                            format_func=lambda pid: next((lbl for x_pid, lbl in prop_options if x_pid == pid), pid),
+                            key="cfg_ga4_multi_default_select",
+                        )
+                    else:
+                        selected_cfg_default_property_id = ""
+            elif selected_scope == "account_only":
+                selected_cfg_allowed_property_ids = []
+                selected_cfg_default_property_id = ""
+                st.caption("L'account viene salvato, la property verra scelta a runtime.")
+            else:
+                selected_cfg_account_name = ""
+                selected_cfg_allowed_property_ids = []
+                selected_cfg_default_property_id = ""
+
+            if selected_cfg_default_property_id and selected_cfg_default_property_id in prop_by_id:
+                selected_cfg_property_name = prop_by_id[selected_cfg_default_property_id].get("property_name", "")
+            selected_cfg_property_id = selected_cfg_default_property_id
+
+            st.session_state.cfg_ga4_account_name = selected_cfg_account_name
+            st.session_state.cfg_ga4_client_name = selected_cfg_account_name
+            st.session_state.cfg_ga4_allowed_property_ids = selected_cfg_allowed_property_ids
+            st.session_state.cfg_ga4_default_property_id = selected_cfg_default_property_id
+            st.session_state.cfg_ga4_property_id = selected_cfg_property_id
+            st.session_state.cfg_ga4_property_name = selected_cfg_property_name
+
+            st.markdown("#### 3) Configurazione app cliente")
+            st.text_input("Client ID", key="cfg_client_id_input", placeholder="es. chicco_2023")
+            st.text_input("Dominio atteso", key="cfg_expected_domain", placeholder="es. chicco.it")
+            st.text_input("Country default", key="cfg_default_country", placeholder="es. it")
+            st.text_input(
+                "Base URL app (per link cliente)",
+                key="cfg_base_url",
+                placeholder="es. https://utm-builder.streamlit.app/ oppure http://localhost:8503",
+            )
+
+            st.markdown("#### 4) Salva e genera link cliente")
+            if st.button("Salva configurazione cliente", key="save_client_config_btn", type="primary", use_container_width=True):
+                cid = normalize_client_id(st.session_state.get("cfg_client_id_input", ""))
+                if not cid:
+                    st.error("Inserisci un Client ID valido.")
+                elif st.session_state.get("cfg_manage_mode") == "Nuova configurazione aggiuntiva" and cid in existing_client_ids:
+                    st.error("Questo Client ID esiste gia. Per aggiornare usa 'Modifica configurazione' oppure inserisci un nuovo Client ID.")
+                else:
+                    existing_cfg = load_client_config(cid) or {}
+                    existing_ga4_profile = _resolve_client_ga4_profile(existing_cfg)
+                    selected_scope = normalize_ga4_scope(st.session_state.get("cfg_ga4_scope", "")) or "single_property"
+                    selected_account_name = str(st.session_state.get("cfg_ga4_account_name", "")).strip()
+                    selected_allowed_ids = [
+                        normalize_property_id(x) for x in (st.session_state.get("cfg_ga4_allowed_property_ids", []) or [])
+                        if normalize_property_id(x)
+                    ]
+                    selected_default_pid = normalize_property_id(st.session_state.get("cfg_ga4_default_property_id", ""))
+
+                    if selected_scope in {"single_property", "multi_property", "account_only"} and not selected_account_name:
+                        st.error("Seleziona un account GA4 cliente per lo scope scelto.")
+                        st.stop()
+                    if selected_scope == "single_property" and not selected_default_pid:
+                        st.error("Single property richiede una property GA4 selezionata.")
+                        st.stop()
+                    if selected_scope == "multi_property":
+                        if not selected_allowed_ids:
+                            st.error("Multi property richiede almeno una property GA4 abilitata.")
+                            st.stop()
+                        if not selected_default_pid:
+                            st.error("Multi property richiede una property di default.")
+                            st.stop()
+                        if selected_default_pid not in selected_allowed_ids:
+                            st.error("La property di default deve appartenere alle property abilitate.")
+                            st.stop()
+
+                    base_url = str(st.session_state.get("cfg_base_url", "")).strip() or "https://utm-builder.streamlit.app/"
+                    if not base_url.startswith(("http://", "https://")):
+                        base_url = f"https://{base_url}"
+                    base_url = base_url.rstrip("/")
+
+                    shared_link = str(existing_cfg.get("shared_link", "")).strip()
+                    if CLIENT_LINK_SECRET:
+                        sig = sign_client_id(cid)
+                        shared_link = f"{base_url}/?client_id={cid}&sig={sig}"
+
+                    extracted = st.session_state.get("cfg_extracted", {})
+                    name_by_id = {
+                        normalize_property_id(x.get("property_id", "")): str(x.get("property_name", "")).strip()
+                        for x in (existing_ga4_profile.get("ga4_allowed_properties", []) or [])
+                        if isinstance(x, dict) and normalize_property_id(x.get("property_id", ""))
+                    }
+                    for pid, meta in prop_by_id.items():
+                        name_by_id[normalize_property_id(pid)] = str(meta.get("property_name", "")).strip()
+
+                    ga4_allowed_properties = []
+                    if selected_scope in {"single_property", "multi_property"}:
+                        target_ids = [selected_default_pid] if selected_scope == "single_property" else selected_allowed_ids
+                        seen_ids = set()
+                        for pid in target_ids:
+                            n_pid = normalize_property_id(pid)
+                            if not n_pid or n_pid in seen_ids:
+                                continue
+                            ga4_allowed_properties.append(
+                                {
+                                    "property_id": n_pid,
+                                    "property_name": name_by_id.get(n_pid, ""),
+                                }
+                            )
+                            seen_ids.add(n_pid)
+                    if selected_scope != "multi_property":
+                        selected_default_pid = selected_default_pid if selected_scope == "single_property" else ""
+
+                    payload = dict(existing_cfg)
+                    payload.update(
+                        {
+                            "client_id": cid,
+                            "version": int(existing_cfg.get("version", 0) or 0) + 1,
+                            "created_at": str(existing_cfg.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                            "updated_by": st.session_state.get("user_email", ""),
+                            "source_file_name": str(st.session_state.get("cfg_rules_file_name", "")).strip(),
+                            "source_file_sha256": str(st.session_state.get("cfg_rules_file_sha256", "")).strip(),
+                            "ga4_scope": selected_scope,
+                            "ga4_account_name": selected_account_name,
+                            "ga4_client_name": selected_account_name,
+                            "ga4_allowed_properties": ga4_allowed_properties,
+                            "ga4_default_property_id": selected_default_pid,
+                            "ga4_property_name": name_by_id.get(selected_default_pid, "") if selected_default_pid else "",
+                            "ga4_property_id": selected_default_pid,
+                            "default_country": normalize_token(st.session_state.get("cfg_default_country", "")) or "it",
+                            "expected_domain": str(st.session_state.get("cfg_expected_domain", "")).strip().lower(),
+                            # Structured data from Excel parsing (no JSON blob)
+                            "sources": extracted.get("sources", existing_cfg.get("sources", [])),
+                            "mediums": extracted.get("mediums", existing_cfg.get("mediums", [])),
+                            "campaign_types": extracted.get("campaign_types", existing_cfg.get("campaign_types", [])),
+                            "campaign_notes": extracted.get("campaign_notes", existing_cfg.get("campaign_notes", [])),
+                            "campaign_examples": extracted.get("campaign_examples", existing_cfg.get("campaign_examples", [])),
+                            "medium_source_map": extracted.get("medium_source_map", existing_cfg.get("medium_source_map", {})),
+                            "shared_link": shared_link,
+                            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
+
+                    saved_path = save_client_config(cid, payload)
+                    st.success(f"Configurazione salvata: {saved_path.name}")
+                    if CLIENT_LINK_SECRET:
+                        st.code(shared_link, language="text")
+                    else:
+                        st.warning("CLIENT_LINK_SECRET non configurato: link firmato non generato.")
+
+        # ==============================================================================
     # TAB 4: UTM HISTORY & TRACKING
     # ==============================================================================
     with tab_history:
@@ -2158,6 +2690,15 @@ def show_dashboard():
 
         history_items = load_utm_history()
         prop_lookup = build_property_name_lookup(st.session_state.get("ga4_accounts", []))
+        ga4_binding_state = st.session_state.get("ga4_binding_state", {}) if isinstance(st.session_state.get("ga4_binding_state", {}), dict) else {}
+        lock_mode = bool(ga4_binding_state.get("lock_mode"))
+        locked_prop_id = str(ga4_binding_state.get("effective_property_id", "")).strip()
+        locked_prop_name = (
+            str(ga4_binding_state.get("effective_property_name", "")).strip()
+            or str(ga4_binding_state.get("configured_property_name", "")).strip()
+            or str(ga4_binding_state.get("resolved_property_name", "")).strip()
+        )
+        locked_prop_accessible = bool(ga4_binding_state.get("is_accessible")) if locked_prop_id else True
         user_email = st.session_state.get("user_email", "")
         if user_email:
             target_hash = _email_hash(user_email)
@@ -2194,9 +2735,29 @@ def show_dashboard():
             selected_index = [f"{x.get('campaign_name','-')} ({x.get('live_date','-')})" for x in history_items].index(selected_campaign)
             selected_item = history_items[selected_index]
             grace_days = st.number_input("Giorni di grace period post-live", min_value=0, max_value=30, value=2, step=1)
+            if lock_mode:
+                st.caption(f"Property attiva per verifica: {_format_property_label(locked_prop_name, locked_prop_id)}")
+                if not locked_prop_id:
+                    st.warning("Verifica GA4 non eseguibile: seleziona prima una property runtime nel Builder.")
+                elif not locked_prop_accessible:
+                    st.warning(
+                        f"Verifica GA4 non eseguibile con questo account: accesso non disponibile a {_format_property_label(locked_prop_name, locked_prop_id)}."
+                    )
 
             if st.button("Verifica tracking su GA4", key="check_tracking_history_btn", type="primary"):
-                result = check_tracking_status_for_entry(selected_item, st.session_state.credentials, grace_days=int(grace_days))
+                selected_for_check = dict(selected_item)
+                if lock_mode:
+                    selected_for_check["property_id"] = locked_prop_id
+                    selected_for_check["property_name"] = locked_prop_name
+                if lock_mode and (not locked_prop_id or not locked_prop_accessible):
+                    result = {
+                        "status": "ERROR",
+                        "message": "Controllo GA4 non eseguibile con questo account: property cliente non accessibile.",
+                        "sessions": 0,
+                        "observed": "-",
+                    }
+                else:
+                    result = check_tracking_status_for_entry(selected_for_check, st.session_state.credentials, grace_days=int(grace_days))
                 status_icon = {"OK": "&#9989;", "WARNING": "&#9888;&#65039;", "ERROR": "&#10060;", "PENDING": "&#9203;"}.get(result["status"], "&#8505;&#65039;")
 
                 st.markdown(
@@ -2209,16 +2770,26 @@ def show_dashboard():
                     unsafe_allow_html=True,
                 )
                 st.write("Dettaglio verifica:")
-                detail_row = {
-                    "Campagna": selected_item.get("campaign_name"),
-                    "Periodo": selected_item.get("live_date"),
-                    "GA4 Property Name": (
+                detail_prop_id = (
+                    locked_prop_id
+                    if lock_mode
+                    else str(selected_item.get("property_id", "")).replace("properties/", "").strip()
+                )
+                detail_prop_name = (
+                    locked_prop_name
+                    if lock_mode
+                    else (
                         selected_item.get("property_name")
                         or prop_lookup.get(str(selected_item.get("property_id", "")).replace("properties/", ""))
                         or prop_lookup.get(str(selected_item.get("property_id", "")))
                         or "-"
-                    ),
-                    "GA4 Property ID": selected_item.get("property_id", "-"),
+                    )
+                )
+                detail_row = {
+                    "Campagna": selected_item.get("campaign_name"),
+                    "Periodo": selected_item.get("live_date"),
+                    "GA4 Property Name": detail_prop_name or "-",
+                    "GA4 Property ID": detail_prop_id or "-",
                     "UTM Source": selected_item.get("utm_source"),
                     "UTM Medium": selected_item.get("utm_medium"),
                     "UTM Campaign": selected_item.get("utm_campaign"),
@@ -2238,9 +2809,19 @@ def show_dashboard():
 
         weekly_client_config = st.session_state.get("active_client_config") or {}
         weekly_client_id = st.session_state.get("active_client_id", "") or normalize_client_id(st.session_state.get("builder_selected_client_id", ""))
-        weekly_prop_id = str((weekly_client_config or {}).get("ga4_property_id", "")).replace("properties/", "").strip() or str(st.session_state.get("builder_selected_property_id", "")).replace("properties/", "").strip()
+        ga4_binding_state = st.session_state.get("ga4_binding_state", {}) if isinstance(st.session_state.get("ga4_binding_state", {}), dict) else {}
+        lock_mode = bool(ga4_binding_state.get("lock_mode"))
+        weekly_prop_id = (
+            str(ga4_binding_state.get("effective_property_id", "")).strip()
+            or str(st.session_state.get("builder_selected_property_id", "")).replace("properties/", "").strip()
+        )
         weekly_prop_lookup = build_property_name_lookup(st.session_state.get("ga4_accounts", []))
-        weekly_prop_name = str((weekly_client_config or {}).get("ga4_property_name", "")).strip() or weekly_prop_lookup.get(weekly_prop_id) or st.session_state.get("builder_selected_property_name", "")
+        weekly_prop_name = (
+            str(ga4_binding_state.get("effective_property_name", "")).strip()
+            or str(ga4_binding_state.get("configured_property_name", "")).strip()
+            or str((weekly_client_config or {}).get("ga4_property_name", "")).strip()
+        ) or weekly_prop_lookup.get(weekly_prop_id) or st.session_state.get("builder_selected_property_name", "")
+        weekly_prop_accessible = bool(ga4_binding_state.get("is_accessible")) if weekly_prop_id else True
 
         default_week_start, default_week_end = get_last_full_week_range()
         info_cols = st.columns([1.2, 1, 1])
@@ -2270,7 +2851,12 @@ def show_dashboard():
         elif not st.session_state.get("credentials"):
             st.warning("Collega prima GA4 per eseguire l'audit settimanale delle campagne.")
         elif not weekly_prop_id:
-            st.warning("La configurazione cliente attiva non ha una property GA4 associata.")
+            st.warning("Nessuna property selezionata. Per i profili senza property vincolata seleziona una property GA4 runtime nel Builder.")
+        elif lock_mode and not weekly_prop_accessible:
+            st.warning(
+                f"Audit GA4 non eseguibile con questo account: accesso non disponibile a {_format_property_label(weekly_prop_name, weekly_prop_id)}. "
+                "Il tool resta operativo con le regole UTM del file cliente."
+            )
         elif weekly_start > weekly_end:
             st.error("Intervallo date non valido: la data inizio deve essere precedente o uguale alla data fine.")
         else:
@@ -2351,13 +2937,42 @@ def show_dashboard():
                 st.caption("Premi il pulsante per analizzare la settimana completa precedente con le regole del cliente attivo.")
 
     # --- RENDER GLOBALLY (FLOATING) ---
+    _chat_client_cfg = st.session_state.get("active_client_config") or {}
+    _chat_prop_cfg = _chat_client_cfg.get("property_config") if isinstance(_chat_client_cfg.get("property_config"), dict) else {}
+    _chat_binding = st.session_state.get("ga4_binding_state", {}) if isinstance(st.session_state.get("ga4_binding_state", {}), dict) else {}
+    _chat_lock_mode = bool(_chat_binding.get("lock_mode"))
+    _chat_preferred_pid = (
+        str(_chat_binding.get("effective_property_id", "")).strip()
+        or (
+            str(_chat_binding.get("configured_property_id", "")).strip()
+            if _chat_lock_mode
+            else str(st.session_state.get("builder_selected_property_id", "")).replace("properties/", "").strip()
+        )
+    )
+    _chat_preferred_name = (
+        str(_chat_binding.get("effective_property_name", "")).strip()
+        or (
+            (str(_chat_binding.get("configured_property_name", "")).strip() or str(_chat_binding.get("resolved_property_name", "")).strip())
+            if _chat_lock_mode
+            else str(st.session_state.get("builder_selected_property_name", "")).strip()
+        )
+    )
+    chat_default_destination_url = (
+        str(_chat_client_cfg.get("default_destination_url", "")).strip()
+        or str(_chat_client_cfg.get("destination_url", "")).strip()
+        or str(_chat_prop_cfg.get("default_destination_url", "")).strip()
+        or str(_chat_prop_cfg.get("expected_domain", "")).strip()
+        or str(st.session_state.get("builder_url_domain", "")).strip()
+    )
     render_chatbot_interface(
         st.session_state.credentials,
         None,
         save_chatbot_url_to_history,
         client_rules_text=st.session_state.get("active_client_rules_text", ""),
-        preferred_property_id=st.session_state.get("builder_selected_property_id", ""),
-        preferred_property_name=st.session_state.get("builder_selected_property_name", ""),
+        preferred_property_id=_chat_preferred_pid,
+        preferred_property_name=_chat_preferred_name,
+        default_destination_url=chat_default_destination_url,
+        ga4_binding_state=_chat_binding,
     )
 
 
@@ -2480,3 +3095,4 @@ if __name__ == "__main__":
             st.warning(st.session_state.get("client_lock_error"))
         show_login_page()
     _render_browser_session_cookie_sync()
+
